@@ -4,8 +4,9 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
  * Gemini 3.5 Flash Lite / 1.5 Flash 連携クライアント
  * TBS「オールスター感謝祭」完全制覇エンジン
  * 
- * VTRタイムシフト映像解析、ビジュアル問題、超ひっかけ・なぞなぞ、
- * 出演者・芸能・TBS独自ネタ、単位・条件省略逆算に完全対応。
+ * VTR動画（WebM完全録画・映像＋音声）直接ネイティブ入力、
+ * ビジュアル問題、超ひっかけ・なぞなぞ、出演者・芸能・TBS独自ネタ、
+ * 単位・条件省略逆算に完全対応。
  */
 
 export const SYSTEM_PROMPT = `あなたはTBS「オールスター感謝祭」で完全全問正解（ノーミス・ピリオドチャンピオン）を勝ち取るための絶対的解答AIです。
@@ -17,9 +18,9 @@ export const SYSTEM_PROMPT = `あなたはTBS「オールスター感謝祭」�
    ・オールスター感謝祭はリモコンの4色ボタン【1:青】【2:赤】【3:緑】【4:黄】で回答します。
    ・1行目には必ず冒頭に【1】〜【4】の番号（および選択肢名）を出力してください。
 
-2. 【映像問題・VTRタイムシフト解析】:
-   ・複数枚の画像が提供された場合、前半の画像は「まずはこちらの映像をご覧ください」で流れた【VTR映像の時系列フレーム】であり、最後の画像が【出題・4択画面】です。
-   ・VTR内で起きた「人物の行動」「ハプニング」「画面の変化」「テロップ」「NGの瞬間」「オチ」を時系列で完全に把握し、問題文「このあと何が起きた？」「今の映像で変わったのは？」「誰の映像？」に完璧に合致する選択肢を選んでください。
+2. 【VTR完全動画（映像＆音声）の時系列追跡・完全理解】:
+   ・VTR動画（WebM等）が提供された場合、その動画の映像の全フレームおよび音声を最初から最後まで精査してください。
+   ・VTR内で起きた「人物の行動」「ハプニング」「画面の変化」「テロップ」「NGの瞬間」「オチ」を1コマ・1秒も逃さず正確にトレースし、出題画面の「このあと何が起きた？」「今の映像で変わったのは？」「誰の映像？」に完璧に合致する選択肢を選んでください。
 
 3. 【超ひっかけ問題・なぞなぞ・言葉遊びの完全看破】:
    ・感謝祭特有の「直感で選ぶと必ず引っかかる罠」「意地悪な引っかけ」を徹底的に警戒してください。
@@ -40,13 +41,14 @@ export const SYSTEM_PROMPT = `あなたはTBS「オールスター感謝祭」�
 ・2行目以降: 正解の決定打・VTR根拠・ひっかけ回避の理由（2〜3行以内、最大150字程度）。
 ・挨拶、前置き、余計な前置き思考は一切出力しないでください。`;
 
-export interface ImageInputItem {
+export interface MediaInputItem {
   base64Data: string;
   mimeType: string;
 }
 
 export interface StreamQuizAnswerOptions {
-  images: ImageInputItem[];
+  video?: MediaInputItem; // VTR完全録画（映像＋音声）
+  images: MediaInputItem[]; // 出題・4択画面静止画
   contextText?: string;
   timeoutMs?: number;
   apiKey?: string;
@@ -66,7 +68,6 @@ export async function* streamQuizAnswer(
     );
   }
 
-  // 高スループット・最速かつ高精度な gemini-3.5-flash-lite を優先（環境変数で上書き可能）
   const modelName =
     options.modelName || process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
   const timeoutMs = options.timeoutMs ?? 7000; // 7秒タイムアウト
@@ -76,7 +77,7 @@ export async function* streamQuizAnswer(
     model: modelName,
     systemInstruction: SYSTEM_PROMPT,
     generationConfig: {
-      temperature: 0.05, // 超厳格・ブレ徹底排除
+      temperature: 0.05,
       maxOutputTokens: 300,
     },
   });
@@ -97,38 +98,32 @@ export async function* streamQuizAnswer(
         }
     > = [];
 
-    const totalImages = options.images.length;
-
-    // 複数フレームがある場合（VTR映像フレーム＋最終出題画面）
-    if (totalImages > 1) {
-      promptParts.push("【直前に流れたVTR映像の時系列フレーム群】:");
-      for (let i = 0; i < totalImages - 1; i++) {
-        promptParts.push({
-          inlineData: {
-            data: options.images[i].base64Data,
-            mimeType: options.images[i].mimeType,
-          },
-        });
-      }
-      promptParts.push("【現在表示されている出題・4択回答画面】:");
+    // 1. VTR完全録画動画（映像＋音声）が存在する場合
+    if (options.video) {
+      promptParts.push("【直前に流れたVTR映像の完全録画（映像フレームおよび音声）】:");
       promptParts.push({
         inlineData: {
-          data: options.images[totalImages - 1].base64Data,
-          mimeType: options.images[totalImages - 1].mimeType,
-        },
-      });
-    } else if (totalImages === 1) {
-      // 単一画像
-      promptParts.push({
-        inlineData: {
-          data: options.images[0].base64Data,
-          mimeType: options.images[0].mimeType,
+          data: options.video.base64Data,
+          mimeType: options.video.mimeType,
         },
       });
     }
 
+    // 2. 出題・4択画面（または複数キーフレーム）
+    if (options.images.length > 0) {
+      promptParts.push("【現在表示されている出題・4択回答画面】:");
+      for (const img of options.images) {
+        promptParts.push({
+          inlineData: {
+            data: img.base64Data,
+            mimeType: img.mimeType,
+          },
+        });
+      }
+    }
+
     let userPromptText =
-      "このオールスター感謝祭の問題を解き、リモコンで押すべき【番号】と選択肢、簡潔な根拠を出力してください。VTR映像、超ひっかけ、ビジュアル、出演者情報、省略された単位・条件を完全に加味してノーミスで正解してください。";
+      "このオールスター感謝祭の問題を解き、リモコンで押すべき【番号】と選択肢、簡潔な根拠を出力してください。VTR動画の内容、超ひっかけ、ビジュアル、出演者情報、省略された単位・条件を完全に加味してノーミスで正解してください。";
 
     if (options.contextText && options.contextText.trim().length > 0) {
       userPromptText += `\n\n【補足コンテキスト・司会者音声メモ・ジャンル指定】:\n${options.contextText.trim()}`;

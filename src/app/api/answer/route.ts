@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { defaultRateLimiter } from "@/lib/rateLimiter";
-import { validateImageBuffer } from "@/lib/validation";
-import { streamQuizAnswer, ImageInputItem } from "@/lib/gemini";
+import { validateMediaBuffer } from "@/lib/validation";
+import { streamQuizAnswer, MediaInputItem } from "@/lib/gemini";
 
 /**
  * 構造化ログ出力ヘルパー
@@ -87,7 +87,8 @@ export async function POST(request: NextRequest) {
   }
 
   // 2. アップロードデータの取得 & バリデーション
-  const imageInputs: ImageInputItem[] = [];
+  let videoInput: MediaInputItem | undefined;
+  const imageInputs: MediaInputItem[] = [];
   let contextText: string | undefined;
 
   try {
@@ -109,24 +110,30 @@ export async function POST(request: NextRequest) {
     const formData = await request.formData();
     contextText = (formData.get("context") as string) || undefined;
 
-    // 単一または複数の画像ファイルを取得
-    const files = formData.getAll("image").concat(formData.getAll("images"));
-
-    if (files.length === 0) {
-      logEvent({
-        level: "warn",
-        requestId,
-        clientIpMasked,
-        status: 400,
-        message: "画像ファイルが送信されていません。",
-      });
-      return NextResponse.json(
-        { error: "有効な画像ファイル（image）を添付してください。" },
-        { status: 400 }
-      );
+    // A. VTR動画ファイル（WebM/MP4）がある場合
+    const videoFile = formData.get("video");
+    if (videoFile && videoFile instanceof Blob) {
+      const videoBuffer = new Uint8Array(await videoFile.arrayBuffer());
+      const videoValidation = validateMediaBuffer(videoBuffer, videoFile.type, true);
+      if (videoValidation.isValid) {
+        videoInput = {
+          base64Data: Buffer.from(videoBuffer).toString("base64"),
+          mimeType: videoValidation.detectedMimeType!,
+        };
+      } else {
+        logEvent({
+          level: "warn",
+          requestId,
+          clientIpMasked,
+          status: 400,
+          message: "動画バリデーション警告",
+          error: videoValidation.error,
+        });
+      }
     }
 
-    // 最大10フレームまで処理（VTRタイムシフト＋出題画面）
+    // B. 静止画ファイル（出題画面・キーフレーム）を取得
+    const files = formData.getAll("image").concat(formData.getAll("images"));
     const targetFiles = files.slice(0, 10);
 
     for (const file of targetFiles) {
@@ -135,8 +142,7 @@ export async function POST(request: NextRequest) {
       const arrayBuffer = await file.arrayBuffer();
       const fileBuffer = new Uint8Array(arrayBuffer);
 
-      // マジックナンバー & サイズ検証
-      const validation = validateImageBuffer(fileBuffer, file.type);
+      const validation = validateMediaBuffer(fileBuffer, file.type, false);
       if (!validation.isValid) {
         logEvent({
           level: "warn",
@@ -146,7 +152,7 @@ export async function POST(request: NextRequest) {
           message: "画像バリデーション不合格",
           error: validation.error,
         });
-        return NextResponse.json({ error: validation.error }, { status: 400 });
+        continue;
       }
 
       imageInputs.push({
@@ -155,9 +161,9 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    if (imageInputs.length === 0) {
+    if (!videoInput && imageInputs.length === 0) {
       return NextResponse.json(
-        { error: "有効な画像データが解析できませんでした。" },
+        { error: "有効な画像または動画データが送信されていません。" },
         { status: 400 }
       );
     }
@@ -185,8 +191,9 @@ export async function POST(request: NextRequest) {
         let firstTokenTime: number | null = null;
         let tokenCount = 0;
 
-        // Gemini 1.5 Flash へのストリーミング推論（7秒タイムアウト設定済み）
+        // Gemini (3.5 Flash Lite) へのストリーミング推論（7秒タイムアウト設定済み）
         for await (const chunk of streamQuizAnswer({
+          video: videoInput,
           images: imageInputs,
           contextText,
         })) {
@@ -231,7 +238,7 @@ export async function POST(request: NextRequest) {
           clientIpMasked,
           durationMs: totalElapsedMs,
           status: 200,
-          message: `オールスター感謝祭解答ストリーミング完了 (画像数: ${
+          message: `オールスター感謝祭解答完了 (動画有無: ${!!videoInput}, 画像数: ${
             imageInputs.length
           }, トークン数: ${tokenCount}, TTFT: ${
             firstTokenTime ? firstTokenTime - startTime : 0

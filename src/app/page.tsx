@@ -30,9 +30,9 @@ interface StreamResponseMeta {
 // オールスター感謝祭・ジャンルプリセット（全タイプ完全網羅）
 const QUIZ_PRESETS = [
   { id: "normal", key: "1", label: "標準4択", prompt: "オールスター感謝祭の標準4択問題。" },
-  { id: "zoom", key: "2", label: "🔍 ズームアウト/写真", prompt: "ズームアウト問題または画像特定問題。パーツや色・輪郭の特徴から全体の被写体を即断せよ。" },
-  { id: "trick", key: "3", label: "⚠️ 超ひっかけ/なぞなぞ", prompt: "超ひっかけ・なぞなぞ・言葉遊び問題。直感的な罠を排除し、文字の構造や真の事実から解け。" },
-  { id: "vtr", key: "4", label: "🎬 VTR映像/NG/変化", prompt: "VTR映像問題（このあと何が起きた？変化した部分は？NGは誰？）。時系列の流れを追って解け。" },
+  { id: "vtr", key: "2", label: "🎬 VTR動画/変化/NG", prompt: "VTR動画問題（このあと何が起きた？変化した部分は？NGは誰？）。映像と音声の時系列の流れから解け。" },
+  { id: "zoom", key: "3", label: "🔍 ズームアウト/写真", prompt: "ズームアウト問題または画像特定問題。パーツや色・輪郭の特徴から全体の被写体を即断せよ。" },
+  { id: "trick", key: "4", label: "⚠️ 超ひっかけ/なぞなぞ", prompt: "超ひっかけ・なぞなぞ・言葉遊び問題。直感的な罠を排除し、文字の構造や真の事実から解け。" },
   { id: "cast_tbs", key: "5", label: "🎤 出演者/TBSネタ/曲", prompt: "出演タレント、MC（今田・島崎）、TBS歴代番組、曲名、過去の名場面問題。" },
   { id: "prediction", key: "6", label: "🏃 勝敗/順位予想", prompt: "スタジオ生対決・マラソン等の勝敗・順位予想問題。" },
 ] as const;
@@ -124,16 +124,17 @@ export default function QuizResponderPage() {
 
   // オールスター感謝祭・制御ステート
   const [selectedPreset, setSelectedPreset] = useState<string>("normal");
-  const [isBurstMode, setIsBurstMode] = useState(false); // 2連写
-  const [isMicActive, setIsMicActive] = useState(false); // 音声聞き取り
-  const [speechTranscript, setSpeechTranscript] = useState(""); // 音声文字起こし
-  const [manualNote, setManualNote] = useState(""); // 手動補足メモ
-  const [isFlashEffect, setIsFlashEffect] = useState(false); // シャッターフラッシュ
+  const [isBurstMode, setIsBurstMode] = useState(false);
+  const [isMicActive, setIsMicActive] = useState(false);
+  const [speechTranscript, setSpeechTranscript] = useState("");
+  const [manualNote, setManualNote] = useState("");
+  const [isFlashEffect, setIsFlashEffect] = useState(false);
 
-  // VTRキーフレーム蓄積（タイムシフト）ステート
+  // VTR完全録画（MediaRecorder）ステート
   const [isVtrRecording, setIsVtrRecording] = useState(false);
-  const [vtrFrameCount, setVtrFrameCount] = useState(0);
-  const vtrFramesRef = useRef<Blob[]>([]);
+  const [vtrRecordSeconds, setVtrRecordSeconds] = useState(0);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
 
   // 解析・推論ステート
   const [isLoading, setIsLoading] = useState(false);
@@ -233,56 +234,65 @@ export default function QuizResponderPage() {
   }, [isMicActive]);
 
   /**
-   * VTRキーフレーム蓄積ループ（1.2秒おきに自動キャプチャ、最大6枚）
+   * VTR完全動画録画の開始 / 停止
    */
-  useEffect(() => {
-    if (!isVtrRecording) return;
+  const startVtrRecording = useCallback(() => {
+    if (!streamRef.current) {
+      alert("カメラが準備できていません。");
+      return;
+    }
 
-    const captureVtrFrame = async () => {
-      if (videoRef.current && isCameraReady) {
-        try {
-          const blob = await captureVideoFrame(videoRef.current, {
-            maxDimension: 1280,
-            quality: 0.7,
-            format: "image/webp",
-          });
-          // 最新6枚を保持するリングバッファ
-          const current = [...vtrFramesRef.current, blob];
-          if (current.length > 6) {
-            current.shift();
-          }
-          vtrFramesRef.current = current;
-          setVtrFrameCount(current.length);
-        } catch (e) {
-          console.warn("VTR frame capture error:", e);
-        }
+    try {
+      recordedChunksRef.current = [];
+      const options = { mimeType: "video/webm;codecs=vp8" };
+      let recorder: MediaRecorder;
+      try {
+        recorder = new MediaRecorder(streamRef.current, options);
+      } catch {
+        // フォールバック
+        recorder = new MediaRecorder(streamRef.current);
       }
-    };
 
-    // 開始直後に1枚目
-    captureVtrFrame();
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+          recordedChunksRef.current.push(event.data);
+        }
+      };
 
-    // 1.2秒ごとに継続
-    const timerId = setInterval(captureVtrFrame, 1200);
+      recorder.start(500); // 500msごとにチャンク取得
+      mediaRecorderRef.current = recorder;
+      setIsVtrRecording(true);
+      setVtrRecordSeconds(0);
+      setSelectedPreset("vtr");
+    } catch (err) {
+      console.error("VTR record start error:", err);
+      alert("VTR録画の開始に失敗しました。");
+    }
+  }, []);
 
-    return () => {
-      clearInterval(timerId);
-    };
-  }, [isVtrRecording, isCameraReady]);
+  const stopVtrRecording = useCallback(() => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+      mediaRecorderRef.current.stop();
+    }
+    setIsVtrRecording(false);
+  }, []);
 
   const toggleVtrRecording = useCallback(() => {
-    setIsVtrRecording((prev) => {
-      if (!prev) {
-        // 開始時はバッファクリア
-        vtrFramesRef.current = [];
-        setVtrFrameCount(0);
-        setSelectedPreset("vtr"); // 自動でVTRジャンルに切り替え
-        return true;
-      } else {
-        return false;
-      }
-    });
-  }, []);
+    if (isVtrRecording) {
+      stopVtrRecording();
+    } else {
+      startVtrRecording();
+    }
+  }, [isVtrRecording, startVtrRecording, stopVtrRecording]);
+
+  // VTR録画中タイマー
+  useEffect(() => {
+    if (!isVtrRecording) return;
+    const interval = setInterval(() => {
+      setVtrRecordSeconds((prev) => prev + 1);
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [isVtrRecording]);
 
   /**
    * カメラの初期化Effect
@@ -305,16 +315,30 @@ export default function QuizResponderPage() {
         return;
       }
       try {
+        // 映像＋音声を同時に取得（VTR録画でテレビ音声も一緒に保存）
         const constraints: MediaStreamConstraints = {
           video: {
             facingMode: { ideal: facingMode },
-            width: { ideal: 1920 },
-            height: { ideal: 1080 },
+            width: { ideal: 1280 }, // 高速転送に最適な720p
+            height: { ideal: 720 },
           },
-          audio: false,
+          audio: true, // 音声も含めてVTR録画
         };
 
-        const mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+        let mediaStream: MediaStream;
+        try {
+          mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+        } catch {
+          // マイクが許可されない場合は映像のみでフォールバック
+          mediaStream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              facingMode: { ideal: facingMode },
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+            },
+            audio: false,
+          });
+        }
 
         if (!isMounted) {
           mediaStream.getTracks().forEach((track) => track.stop());
@@ -339,7 +363,7 @@ export default function QuizResponderPage() {
         const message =
           err instanceof Error
             ? err.name === "NotAllowedError" || err.name === "PermissionDeniedError"
-              ? "カメラの使用が拒否されています。ブラウザの設定でカメラアクセスを許可してください。"
+              ? "カメラまたはマイクの使用が拒否されています。ブラウザの設定でアクセスを許可してください。"
               : `カメラの起動に失敗しました: ${err.message}`
             : "カメラの起動に失敗しました。";
         setCameraError(message);
@@ -366,122 +390,127 @@ export default function QuizResponderPage() {
   };
 
   /**
-   * SSEストリーミング解析の実行
+   * SSEストリーミング解析の実行（VTR動画Blob + 出題画面Blob）
    */
-  const executeAnalysis = useCallback(async (blobs: Blob[]) => {
-    if (typeof navigator !== "undefined" && navigator.vibrate) {
-      navigator.vibrate(40);
-    }
+  const executeAnalysis = useCallback(
+    async (params: { videoBlob?: Blob; imageBlobs: Blob[] }) => {
+      if (typeof navigator !== "undefined" && navigator.vibrate) {
+        navigator.vibrate(40);
+      }
 
-    setIsFlashEffect(true);
-    setTimeout(() => setIsFlashEffect(false), 150);
+      setIsFlashEffect(true);
+      setTimeout(() => setIsFlashEffect(false), 150);
 
-    setIsLoading(true);
-    setErrorMessage(null);
-    setAnswerRawText("");
-    setMetaInfo(null);
+      setIsLoading(true);
+      setErrorMessage(null);
+      setAnswerRawText("");
+      setMetaInfo(null);
 
-    // VTR記録中だった場合は停止
-    setIsVtrRecording(false);
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+      const abortController = new AbortController();
+      abortControllerRef.current = abortController;
 
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-    }
-    const abortController = new AbortController();
-    abortControllerRef.current = abortController;
+      const formData = new FormData();
 
-    const formData = new FormData();
-    blobs.forEach((blob, idx) => {
-      formData.append("images", blob, `frame_${idx}.webp`);
-    });
+      // VTR完全録画動画
+      if (params.videoBlob && params.videoBlob.size > 0) {
+        formData.append("video", params.videoBlob, "vtr_recording.webm");
+      }
 
-    const preset = QUIZ_PRESETS.find((p) => p.id === selectedPreset);
-    const contextParts: string[] = [];
-    if (preset && preset.id !== "normal") {
-      contextParts.push(`【出題ジャンル・特性】: ${preset.prompt}`);
-    }
-    if (speechTranscript.trim()) {
-      contextParts.push(`【テレビ出題音声/司会ナレーション】: ${speechTranscript.trim()}`);
-    }
-    if (manualNote.trim()) {
-      contextParts.push(`【単位・条件ヒント】: ${manualNote.trim()}`);
-    }
-
-    if (contextParts.length > 0) {
-      formData.append("context", contextParts.join("\n"));
-    }
-
-    try {
-      const response = await fetch("/api/answer", {
-        method: "POST",
-        body: formData,
-        signal: abortController.signal,
+      // 出題・4択画面静止画
+      params.imageBlobs.forEach((blob, idx) => {
+        formData.append("images", blob, `question_${idx}.webp`);
       });
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error || `リクエスト失敗 (Status: ${response.status})`);
+      const preset = QUIZ_PRESETS.find((p) => p.id === selectedPreset);
+      const contextParts: string[] = [];
+      if (preset && preset.id !== "normal") {
+        contextParts.push(`【出題ジャンル・特性】: ${preset.prompt}`);
+      }
+      if (speechTranscript.trim()) {
+        contextParts.push(`【テレビ出題音声/司会ナレーション】: ${speechTranscript.trim()}`);
+      }
+      if (manualNote.trim()) {
+        contextParts.push(`【単位・条件ヒント】: ${manualNote.trim()}`);
       }
 
-      if (!response.body) {
-        throw new Error("ストリーミングレスポンスを受信できませんでした。");
+      if (contextParts.length > 0) {
+        formData.append("context", contextParts.join("\n"));
       }
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder("utf-8");
-      let buffer = "";
+      try {
+        const response = await fetch("/api/answer", {
+          method: "POST",
+          body: formData,
+          signal: abortController.signal,
+        });
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          throw new Error(errorData.error || `リクエスト失敗 (Status: ${response.status})`);
+        }
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n\n");
-        buffer = lines.pop() || "";
+        if (!response.body) {
+          throw new Error("ストリーミングレスポンスを受信できませんでした。");
+        }
 
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (trimmed.startsWith("data: ")) {
-            try {
-              const payload = JSON.parse(trimmed.replace(/^data:\s*/, ""));
-              if (payload.type === "chunk") {
-                setAnswerRawText((prev) => prev + payload.text);
-              } else if (payload.type === "meta") {
-                setMetaInfo((prev) => ({
-                  ...prev,
-                  ttftMs: payload.ttftMs,
-                }));
-              } else if (payload.type === "done") {
-                setMetaInfo((prev) => ({
-                  ...prev,
-                  elapsedMs: payload.elapsedMs,
-                }));
-              } else if (payload.type === "error") {
-                setErrorMessage(payload.error || "推論エラーが発生しました。");
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder("utf-8");
+        let buffer = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n\n");
+          buffer = lines.pop() || "";
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (trimmed.startsWith("data: ")) {
+              try {
+                const payload = JSON.parse(trimmed.replace(/^data:\s*/, ""));
+                if (payload.type === "chunk") {
+                  setAnswerRawText((prev) => prev + payload.text);
+                } else if (payload.type === "meta") {
+                  setMetaInfo((prev) => ({
+                    ...prev,
+                    ttftMs: payload.ttftMs,
+                  }));
+                } else if (payload.type === "done") {
+                  setMetaInfo((prev) => ({
+                    ...prev,
+                    elapsedMs: payload.elapsedMs,
+                  }));
+                } else if (payload.type === "error") {
+                  setErrorMessage(payload.error || "推論エラーが発生しました。");
+                }
+              } catch {
+                // ignore
               }
-            } catch {
-              // ignore
             }
           }
         }
+      } catch (err: unknown) {
+        if (err instanceof Error && err.name === "AbortError") {
+          return;
+        }
+        const message = err instanceof Error ? err.message : "予期せぬエラーが発生しました。";
+        setErrorMessage(message);
+      } finally {
+        setIsLoading(false);
+        abortControllerRef.current = null;
+        recordedChunksRef.current = [];
       }
-    } catch (err: unknown) {
-      if (err instanceof Error && err.name === "AbortError") {
-        return;
-      }
-      const message = err instanceof Error ? err.message : "予期せぬエラーが発生しました。";
-      setErrorMessage(message);
-    } finally {
-      setIsLoading(false);
-      abortControllerRef.current = null;
-      // VTRバッファをリセット
-      vtrFramesRef.current = [];
-      setVtrFrameCount(0);
-    }
-  }, [selectedPreset, speechTranscript, manualNote]);
+    },
+    [selectedPreset, speechTranscript, manualNote]
+  );
 
   /**
-   * キャプチャ実行（VTR蓄積フレーム＋現在の出題画面をまとめて送信）
+   * 解答キャプチャ実行（VTR動画があれば完全動画＋現在の出題画面を同時送信）
    */
   const handleCapture = useCallback(async () => {
     if (isLoading) return;
@@ -491,18 +520,36 @@ export default function QuizResponderPage() {
     }
 
     try {
-      // 1. 蓄積されたVTRフレーム群（あれば）
-      const blobs: Blob[] = [...vtrFramesRef.current];
+      // 1. VTR録画中だった場合は即座に停止してBlobを取得
+      let videoBlob: Blob | undefined;
+      if (isVtrRecording && mediaRecorderRef.current) {
+        const recorder = mediaRecorderRef.current;
+        if (recorder.state !== "inactive") {
+          await new Promise<void>((resolve) => {
+            recorder.onstop = () => {
+              if (recordedChunksRef.current.length > 0) {
+                videoBlob = new Blob(recordedChunksRef.current, {
+                  type: "video/webm",
+                });
+              }
+              resolve();
+            };
+            recorder.stop();
+          });
+        }
+        setIsVtrRecording(false);
+      }
 
-      // 2. 現在の出題・4択画面フレーム
+      // 2. 現在の出題・4択画面フレームをキャプチャ
+      const imageBlobs: Blob[] = [];
       const currentBlob = await captureVideoFrame(videoRef.current, {
         maxDimension: 1280,
         quality: 0.75,
         format: "image/webp",
       });
-      blobs.push(currentBlob);
+      imageBlobs.push(currentBlob);
 
-      // 3. 2連写モードの場合、0.7秒後にさらにもう1枚追加
+      // 3. 2連写モードの場合、0.7秒後にもう1枚
       if (isBurstMode) {
         await new Promise((resolve) => setTimeout(resolve, 700));
         if (videoRef.current) {
@@ -511,16 +558,16 @@ export default function QuizResponderPage() {
             quality: 0.75,
             format: "image/webp",
           });
-          blobs.push(secondBlob);
+          imageBlobs.push(secondBlob);
         }
       }
 
-      await executeAnalysis(blobs);
+      await executeAnalysis({ videoBlob, imageBlobs });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "キャプチャ処理に失敗しました。";
       setErrorMessage(msg);
     }
-  }, [isLoading, isCameraReady, isBurstMode, executeAnalysis]);
+  }, [isLoading, isCameraReady, isVtrRecording, isBurstMode, executeAnalysis]);
 
   /**
    * PCキーボードショートカット割り当て
@@ -542,7 +589,7 @@ export default function QuizResponderPage() {
         return;
       }
 
-      // V: VTR記録開始/停止トグル
+      // V: VTR完全録画 開始/停止トグル
       if (e.key === "v" || e.key === "V") {
         e.preventDefault();
         toggleVtrRecording();
@@ -569,8 +616,7 @@ export default function QuizResponderPage() {
         setAnswerRawText("");
         setErrorMessage(null);
         setMetaInfo(null);
-        vtrFramesRef.current = [];
-        setVtrFrameCount(0);
+        recordedChunksRef.current = [];
         setIsVtrRecording(false);
         return;
       }
@@ -608,7 +654,7 @@ export default function QuizResponderPage() {
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      executeAnalysis([file]);
+      executeAnalysis({ imageBlobs: [file] });
     }
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
@@ -628,8 +674,7 @@ export default function QuizResponderPage() {
     setMetaInfo(null);
     setSpeechTranscript("");
     setManualNote("");
-    vtrFramesRef.current = [];
-    setVtrFrameCount(0);
+    recordedChunksRef.current = [];
     setIsVtrRecording(false);
   };
 
@@ -646,7 +691,7 @@ export default function QuizResponderPage() {
         type="file"
         ref={fileInputRef}
         onChange={handleFileUpload}
-        accept="image/webp,image/jpeg,image/png"
+        accept="image/webp,image/jpeg,image/png,video/webm,video/mp4"
         className="hidden"
       />
 
@@ -667,16 +712,16 @@ export default function QuizResponderPage() {
                 </span>
               </div>
               <p className="text-[10px] text-gray-400">
-                VTRタイムシフト・超ひっかけ・ビジュアル・全問題完全対応
+                VTR完全録画（1フレームも逃さない）| 10秒タイマー即答
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-1.5">
-            {/* 🎥 VTRタイムシフト記録ボタン [V] */}
+            {/* 🎥 VTR完全動画録画ボタン [V] */}
             <button
               onClick={toggleVtrRecording}
-              title="VTR映像記録 [V]（司会者の『映像をご覧ください』で押す）"
+              title="VTR動画録画 [V]（司会者の『映像をご覧ください』で押す）"
               className={`px-2.5 py-1.5 rounded-lg border transition flex items-center gap-1.5 text-xs font-black ${
                 isVtrRecording
                   ? "bg-red-600 border-red-400 text-white animate-pulse shadow-lg shadow-red-600/40"
@@ -686,12 +731,12 @@ export default function QuizResponderPage() {
               {isVtrRecording ? (
                 <>
                   <Video className="w-4 h-4 text-white animate-bounce" />
-                  <span>VTR記録中 ({vtrFrameCount}枚)</span>
+                  <span>VTR録画中 ({vtrRecordSeconds}s)</span>
                 </>
               ) : (
                 <>
                   <VideoOff className="w-4 h-4 text-gray-400" />
-                  <span>VTR記録 [V]</span>
+                  <span>VTR録画 [V]</span>
                 </>
               )}
             </button>
@@ -740,7 +785,7 @@ export default function QuizResponderPage() {
             <button
               onClick={() => fileInputRef.current?.click()}
               disabled={isLoading}
-              title="画像ファイル選択"
+              title="ファイル選択（動画・画像）"
               className="p-1.5 rounded-lg bg-gray-800/80 hover:bg-gray-700 border border-gray-700/60 text-gray-300 transition"
             >
               <Upload className="w-4 h-4" />
@@ -839,7 +884,7 @@ export default function QuizResponderPage() {
                   onClick={() => fileInputRef.current?.click()}
                   className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition border border-gray-700"
                 >
-                  <Upload className="w-3.5 h-3.5" /> 画像選択
+                  <Upload className="w-3.5 h-3.5" /> ファイル選択
                 </button>
               </div>
             </div>
@@ -852,11 +897,11 @@ export default function QuizResponderPage() {
             </div>
           )}
 
-          {/* VTR記録中ステータスバッジ（画面オーバーレイ） */}
+          {/* VTR録画中ステータスバッジ（画面オーバーレイ） */}
           {isVtrRecording && (
-            <div className="absolute top-3 left-3 bg-red-600/90 text-white font-black px-3 py-1.5 rounded-xl shadow-lg border border-red-400 text-xs flex items-center gap-2 animate-pulse z-20">
+            <div className="absolute top-3 left-3 bg-red-600/90 text-white font-black px-3.5 py-1.5 rounded-xl shadow-2xl border border-red-400 text-xs flex items-center gap-2 animate-pulse z-20">
               <span className="w-2.5 h-2.5 rounded-full bg-white animate-ping" />
-              <span>VTR記録中: {vtrFrameCount}フレーム蓄積済 (VTR終了後Spaceを押下)</span>
+              <span>VTR動画録画中: {vtrRecordSeconds}秒 (映像・音声 完全記録) ➔ 終了後Spaceで解答</span>
             </div>
           )}
 
@@ -880,7 +925,7 @@ export default function QuizResponderPage() {
               </div>
 
               <div className="text-[10px] text-gray-400 bg-black/60 px-2 py-0.5 rounded font-mono">
-                {isBurstMode ? "📑 2連写モードON" : isVtrRecording ? "🎬 VTRタイムシフト蓄積中" : "⚡ 1枚高速判定"} | [Space]キーで解答
+                {isVtrRecording ? "🎬 VTR動画録画中（1コマも逃さない）" : isBurstMode ? "📑 2連写モードON" : "⚡ 高速判定"} | [Space]キーで解答
               </div>
             </div>
           )}
@@ -965,7 +1010,7 @@ export default function QuizResponderPage() {
               {isLoading && !firstLine && (
                 <div className="flex items-center gap-2 py-3 justify-center text-amber-300 text-xs font-bold">
                   <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-ping" />
-                  <span>10秒カウントダウン！VTR・画像・音声・単位逆算中...（目標1〜2秒）</span>
+                  <span>10秒カウントダウン！VTR動画全編・音声・画像逆算中...（目標1〜2秒）</span>
                 </div>
               )}
             </div>
@@ -1014,7 +1059,7 @@ export default function QuizResponderPage() {
             <Keyboard className="w-3 h-3" /> 操作:
           </span>
           <span><strong className="text-amber-400">[Space]</strong> 撮影</span>
-          <span><strong className="text-red-400">[V]</strong> VTR記録</span>
+          <span><strong className="text-red-400">[V]</strong> VTR録画</span>
           <span><strong className="text-cyan-400">[M]</strong> マイク</span>
           <span><strong className="text-cyan-400">[B]</strong> 2連写</span>
           <span><strong className="text-cyan-400">[R]</strong> リセット</span>

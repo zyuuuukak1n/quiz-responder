@@ -10,8 +10,8 @@ vi.mock("@google/generative-ai", () => {
           generateContentStream: vi.fn().mockImplementation(async () => {
             return {
               stream: (async function* () {
-                yield { text: () => "【2】 赤（織田信長）\n" };
-                yield { text: () => "解説: 画面の肖像画と火縄銃の特徴より織田信長が正解です。" };
+                yield { text: () => "【1】 青（転んだ）\n" };
+                yield { text: () => "解説: VTR動画の8秒付近で階段を踏み外して転倒した場面が確認できます。" };
               })(),
             };
           }),
@@ -27,10 +27,10 @@ describe("gemini.ts - オールスター感謝祭 完全制覇エンジン (gemi
     delete process.env.GEMINI_API_KEY;
   });
 
-  it("システムプロンプトがVTR映像解析・超ひっかけなぞなぞ・ビジュアル・出演者・単位逆算を網羅していること", () => {
+  it("システムプロンプトがVTR完全動画・超ひっかけなぞなぞ・ビジュアル・出演者・単位逆算を網羅していること", () => {
     expect(SYSTEM_PROMPT).toContain("オールスター感謝祭");
     expect(SYSTEM_PROMPT).toContain("リモコン4択番号");
-    expect(SYSTEM_PROMPT).toContain("VTRタイムシフト解析");
+    expect(SYSTEM_PROMPT).toContain("VTR完全動画（映像＆音声）");
     expect(SYSTEM_PROMPT).toContain("超ひっかけ問題・なぞなぞ");
     expect(SYSTEM_PROMPT).toContain("ズームアウト");
     expect(SYSTEM_PROMPT).toContain("単位・条件・問題文省略の逆算・復元");
@@ -51,14 +51,16 @@ describe("gemini.ts - オールスター感謝祭 完全制覇エンジン (gemi
     );
   });
 
-  it("複数VTRフレームと最終画面をモックAPIでストリーミング推論できること", async () => {
+  it("VTR完全動画と出題画面をモックAPIでストリーミング推論できること", async () => {
     const generator = streamQuizAnswer({
+      video: {
+        base64Data: "dGVzdF92aWRlbw==",
+        mimeType: "video/webm",
+      },
       images: [
-        { base64Data: "ZnJhbWUx", mimeType: "image/webp" },
-        { base64Data: "ZnJhbWUy", mimeType: "image/webp" },
         { base64Data: "cXVlc3Rpb24=", mimeType: "image/webp" },
       ],
-      contextText: "VTR問題: このあと誰が転んだか",
+      contextText: "VTR問題: このあとどうなる？",
       apiKey: "test-mock-api-key",
     });
 
@@ -68,7 +70,7 @@ describe("gemini.ts - オールスター感謝祭 完全制覇エンジン (gemi
     }
 
     expect(chunks.length).toBe(2);
-    expect(chunks[0]).toBe("【2】 赤（織田信長）\n");
-    expect(chunks[1]).toContain("画面の肖像画");
+    expect(chunks[0]).toBe("【1】 青（転んだ）\n");
+    expect(chunks[1]).toContain("階段を踏み外して");
   });
 });
