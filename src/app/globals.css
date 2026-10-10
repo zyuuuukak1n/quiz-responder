@@ -1,0 +1,62 @@
+@import "tailwindcss";
+
+:root {
+  --background: #090d16;
+  --foreground: #f3f4f6;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    sans-serif;
+  overflow-x: hidden;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* スキャンレーザーアニメーション */
+@keyframes scanline {
+  0% {
+    top: 0%;
+    opacity: 0.8;
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    top: 98%;
+    opacity: 0.8;
+  }
+}
+
+.animate-scanline {
+  animation: scanline 2.2s ease-in-out infinite alternate;
+}
+
+/* パルス発光アニメーション */
+@keyframes glowPulse {
+  0%, 100% {
+    box-shadow: 0 0 15px rgba(16, 185, 129, 0.3), inset 0 0 15px rgba(16, 185, 129, 0.2);
+  }
+  50% {
+    box-shadow: 0 0 25px rgba(16, 185, 129, 0.6), inset 0 0 25px rgba(16, 185, 129, 0.35);
+  }
+}
+
+.animate-glow-pulse {
+  animation: glowPulse 2s infinite ease-in-out;
+}
+
+/* カスタムスクロールバー */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.6);
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(51, 65, 85, 0.8);
+  border-radius: 4px;
+}
