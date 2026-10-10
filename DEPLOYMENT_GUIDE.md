@@ -152,7 +152,41 @@ sudo systemctl start quiz-responder
 sudo systemctl status quiz-responder
 ```
 
-### 3.4. Apache2 リバースプロキシ設定の作成
+### 3.4. 公開ルーティング設定（Cloudflare Tunnel または Apache2）
+
+自宅サーバー環境に合わせて、以下のいずれかの方法で外部公開を設定します。
+
+#### 【推奨】方法A: Cloudflare Tunnel（config.yml 管理）で直接公開する場合
+Cloudflare Tunnel を導入済みの場合、Apache2 や Let's Encrypt（SSL証明書）の設定を一切介さず、Cloudflare Tunnel から直接 Next.js（ポート3055）へトラフィックを転送するのが最も低遅延かつ確実です。
+
+1. **サーバー側の設定ファイル（`/etc/cloudflared/config.yml`）を編集**:
+   ```bash
+   sudo nano /etc/cloudflared/config.yml
+   ```
+2. **`ingress` ルールにサブドメインを追加**:
+   ```yaml
+   ingress:
+     # ▼ QuizFast AI のルーティングを追加
+     - hostname: quiz.zyuuuukak1n.dev
+       service: http://localhost:3055
+
+     # 既存の他サービス設定...
+     # - hostname: example.zyuuuukak1n.dev
+     #   service: http://localhost:8080
+
+     # 最後のフォールバック（必ず末尾に配置）
+     - service: http_status:404
+   ```
+3. **Cloudflare DNS に CNAME が登録されていることを確認**:
+   - Cloudflare ダッシュボードの DNS レコードまたは Zero Trust の Public Hostname に `quiz` -> `<Tunnel-ID>.cfargotunnel.com` が設定されていること。
+4. **cloudflared サービスを再起動**:
+   ```bash
+   sudo systemctl restart cloudflared
+   ```
+
+---
+
+#### 方法B: Apache2 リバースプロキシ経由で公開する場合
 既存のApache2設定に干渉しないよう、独立した設定ファイル `/etc/apache2/sites-available/quiz-responder.conf` を作成します。
 SSEストリーミングをリアルタイムに届けるため、`proxy_http` および `proxy_wstunnel`（または `no-buffer` ヘッダー対応）を有効化します。
 
@@ -167,7 +201,6 @@ sudo a2enmod ssl
 sudo tee /etc/apache2/sites-available/quiz-responder.conf << 'EOF'
 <VirtualHost *:80>
     ServerName quiz.yourdomain.com
-    # ドメインを持たない場合はServerAliasまたは特定IPを指定
 
     # ログ設定（独立ファイルに出力）
     ErrorLog ${APACHE_LOG_DIR}/quiz_responder_error.log
@@ -197,7 +230,7 @@ sudo apache2ctl configtest
 sudo systemctl reload apache2
 ```
 
-> **HTTPS化について**: スマートフォンのカメラAPI（`getUserMedia`）はセキュリティ上、ローカルホスト（`localhost`）または `HTTPS` 環境でしか動作しません。本番運用の際は Let's Encrypt（`certbot`）等でSSL証明書を適用してください。
+> **HTTPS化について**: スマートフォンのカメラAPI（`getUserMedia`）はセキュリティ上、ローカルホスト（`localhost`）または `HTTPS` 環境でしか動作しません。Apache2経由で公開する場合は Let's Encrypt（`certbot`）等でSSL証明書を適用してください。
 > ```bash
 > sudo certbot --apache -d quiz.yourdomain.com
 > ```

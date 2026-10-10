@@ -3,16 +3,18 @@
 import React, { useState, useEffect, useRef } from "react";
 import {
   Camera,
-  Zap,
   RefreshCw,
   SwitchCamera,
   Copy,
   Check,
   AlertCircle,
   Upload,
-  Sparkles,
   Clock,
-  ShieldCheck,
+  Mic,
+  MicOff,
+  Layers,
+  Sparkles,
+  Tv,
 } from "lucide-react";
 import { captureVideoFrame } from "@/lib/imageUtils";
 
@@ -21,16 +23,93 @@ interface StreamResponseMeta {
   elapsedMs?: number;
 }
 
+// オールスター感謝祭・ジャンルプリセット
+const QUIZ_PRESETS = [
+  { id: "normal", label: "標準4択", prompt: "オールスター感謝祭の標準4択問題" },
+  { id: "zoom", label: "🔍 ズームアウト/写真", prompt: "ズームアウト問題または画像特定問題。パーツや色・輪郭の特徴から全体の正解を特定せよ。" },
+  { id: "trick", label: "⚠️ ひっかけ・意地悪", prompt: "意地悪・引っかけ問題。ありがちな直感の間違いを徹底警戒し、真の事実関係で判断せよ。" },
+  { id: "person_song", label: "🎤 人物/曲名/過去映像", prompt: "人物当て・曲名・セリフ・過去のTBS名場面問題。" },
+  { id: "prediction", label: "🏃 勝敗/順位予想", prompt: "スタジオ生対決・マラソン等の勝敗・順位予想問題。" },
+] as const;
+
+// リモコンカラー判定ヘルパー
+interface AnswerColorInfo {
+  num: number | null;
+  colorName: string;
+  bgClass: string;
+  borderClass: string;
+  textClass: string;
+  label: string;
+}
+
+function parseAnswerColor(line: string): AnswerColorInfo {
+  // 1:青, 2:赤, 3:緑, 4:黄 の判定
+  if (/1|青|①/.test(line)) {
+    return {
+      num: 1,
+      colorName: "青",
+      bgClass: "bg-blue-600/30",
+      borderClass: "border-blue-500",
+      textClass: "text-blue-300",
+      label: "【1】 青ボタン",
+    };
+  }
+  if (/2|赤|②/.test(line)) {
+    return {
+      num: 2,
+      colorName: "赤",
+      bgClass: "bg-red-600/30",
+      borderClass: "border-red-500",
+      textClass: "text-red-300",
+      label: "【2】 赤ボタン",
+    };
+  }
+  if (/3|緑|③/.test(line)) {
+    return {
+      num: 3,
+      colorName: "緑",
+      bgClass: "bg-emerald-600/30",
+      borderClass: "border-emerald-500",
+      textClass: "text-emerald-300",
+      label: "【3】 緑ボタン",
+    };
+  }
+  if (/4|黄|④/.test(line)) {
+    return {
+      num: 4,
+      colorName: "黄",
+      bgClass: "bg-amber-500/30",
+      borderClass: "border-amber-400",
+      textClass: "text-amber-300",
+      label: "【4】 黄ボタン",
+    };
+  }
+
+  return {
+    num: null,
+    colorName: "正解",
+    bgClass: "bg-cyan-500/20",
+    borderClass: "border-cyan-400",
+    textClass: "text-cyan-300",
+    label: "正解",
+  };
+}
+
 export default function QuizResponderPage() {
   // カメラ関連ステート & Ref
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
-  const [facingMode, setFacingMode] = useState<"environment" | "user">(
-    "environment"
-  );
+  const [facingMode, setFacingMode] = useState<"environment" | "user">("environment");
   const [isCameraReady, setIsCameraReady] = useState(false);
   const [cameraReloadKey, setCameraReloadKey] = useState(0);
+
+  // オールスター感謝祭・拡張制御ステート
+  const [selectedPreset, setSelectedPreset] = useState<string>("normal");
+  const [isBurstMode, setIsBurstMode] = useState(false); // 2枚連続撮影（ズームアウト用）
+  const [isMicActive, setIsMicActive] = useState(false); // 音声聞き取り
+  const [speechTranscript, setSpeechTranscript] = useState(""); // 音声文字起こし
+  const [manualNote, setManualNote] = useState(""); // 手動補足メモ
 
   // 解析・推論ステート
   const [isLoading, setIsLoading] = useState(false);
@@ -38,21 +117,103 @@ export default function QuizResponderPage() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [metaInfo, setMetaInfo] = useState<StreamResponseMeta | null>(null);
   const [copied, setCopied] = useState(false);
-  const [capturedImagePreview, setCapturedImagePreview] = useState<string | null>(
-    null
-  );
 
   // ファイル入力参照（カメラ非対応時のフォールバック用）
   const fileInputRef = useRef<HTMLInputElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
 
+  // 音声認識オブジェクト参照
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const recognitionRef = useRef<any>(null);
+
   /**
-   * カメラの初期化Effect（React 19 & ESLint推奨プラクティス）
+   * Web Speech API（テレビ出題音声・ナレーション自動取得）
+   */
+  useEffect(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) return;
+
+    try {
+      const recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = "ja-JP";
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      recognition.onresult = (event: any) => {
+        let transcript = "";
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          transcript += event.results[i][0].transcript;
+        }
+        if (transcript.trim()) {
+          setSpeechTranscript((prev) => {
+            const combined = `${prev} ${transcript}`.trim();
+            // 直近150文字程度を保持
+            return combined.slice(-150);
+          });
+        }
+      };
+
+      recognition.onerror = () => {
+        setIsMicActive(false);
+      };
+
+      recognition.onend = () => {
+        if (isMicActive) {
+          try {
+            recognition.start();
+          } catch {
+            setIsMicActive(false);
+          }
+        }
+      };
+
+      recognitionRef.current = recognition;
+    } catch (e) {
+      console.warn("Speech recognition init error:", e);
+    }
+
+    return () => {
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+        } catch {
+          // ignore
+        }
+      }
+    };
+  }, [isMicActive]);
+
+  const toggleMic = () => {
+    if (!recognitionRef.current) {
+      alert("お使いのブラウザは音声認識に対応していません。手動メモ欄をご活用ください。");
+      return;
+    }
+
+    if (isMicActive) {
+      try {
+        recognitionRef.current.stop();
+      } catch {
+        // ignore
+      }
+      setIsMicActive(false);
+    } else {
+      try {
+        recognitionRef.current.start();
+        setIsMicActive(true);
+      } catch (err) {
+        console.error("Mic start error:", err);
+      }
+    }
+  };
+
+  /**
+   * カメラの初期化Effect
    */
   useEffect(() => {
     let isMounted = true;
 
-    // 前のストリームを停止
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
@@ -77,9 +238,7 @@ export default function QuizResponderPage() {
           audio: false,
         };
 
-        const mediaStream = await navigator.mediaDevices.getUserMedia(
-          constraints
-        );
+        const mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
 
         if (!isMounted) {
           mediaStream.getTracks().forEach((track) => track.stop());
@@ -103,9 +262,8 @@ export default function QuizResponderPage() {
         console.error("Camera init error:", err);
         const message =
           err instanceof Error
-            ? err.name === "NotAllowedError" ||
-              err.name === "PermissionDeniedError"
-              ? "カメラの使用が拒否されています。ブラウザの設定でカメラへのアクセスを許可してください。"
+            ? err.name === "NotAllowedError" || err.name === "PermissionDeniedError"
+              ? "カメラの使用が拒否されています。ブラウザの設定でカメラアクセスを許可してください。"
               : `カメラの起動に失敗しました: ${err.message}`
             : "カメラの起動に失敗しました。";
         setCameraError(message);
@@ -127,9 +285,6 @@ export default function QuizResponderPage() {
     };
   }, [facingMode, cameraReloadKey]);
 
-  /**
-   * カメラの前後切り替え
-   */
   const toggleFacingMode = () => {
     setFacingMode((prev) => (prev === "environment" ? "user" : "environment"));
   };
@@ -137,8 +292,7 @@ export default function QuizResponderPage() {
   /**
    * SSEストリーミング解析の実行
    */
-  const executeAnalysis = async (imageBlob: Blob) => {
-    // 触覚フィードバック（対応端末のみ）
+  const executeAnalysis = async (blobs: Blob[]) => {
     if (typeof navigator !== "undefined" && navigator.vibrate) {
       navigator.vibrate(40);
     }
@@ -148,11 +302,6 @@ export default function QuizResponderPage() {
     setAnswerRawText("");
     setMetaInfo(null);
 
-    // 画像プレビューURL生成
-    const previewUrl = URL.createObjectURL(imageBlob);
-    setCapturedImagePreview(previewUrl);
-
-    // 前のリクエストがあれば中断
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
     }
@@ -160,7 +309,26 @@ export default function QuizResponderPage() {
     abortControllerRef.current = abortController;
 
     const formData = new FormData();
-    formData.append("image", imageBlob, "captured.webp");
+    blobs.forEach((blob, idx) => {
+      formData.append("images", blob, `frame_${idx}.webp`);
+    });
+
+    // コンテキストの組み立て（ジャンル + 音声認識 + 手動メモ）
+    const preset = QUIZ_PRESETS.find((p) => p.id === selectedPreset);
+    const contextParts: string[] = [];
+    if (preset && preset.id !== "normal") {
+      contextParts.push(`【出題ジャンル・特性】: ${preset.prompt}`);
+    }
+    if (speechTranscript.trim()) {
+      contextParts.push(`【テレビ音声/司会ナレーション聞き取り】: ${speechTranscript.trim()}`);
+    }
+    if (manualNote.trim()) {
+      contextParts.push(`【ユーザー補足ヒント】: ${manualNote.trim()}`);
+    }
+
+    if (contextParts.length > 0) {
+      formData.append("context", contextParts.join("\n"));
+    }
 
     try {
       const response = await fetch("/api/answer", {
@@ -171,9 +339,7 @@ export default function QuizResponderPage() {
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
-        throw new Error(
-          errorData.error || `リクエスト失敗 (Status: ${response.status})`
-        );
+        throw new Error(errorData.error || `リクエスト失敗 (Status: ${response.status})`);
       }
 
       if (!response.body) {
@@ -213,18 +379,16 @@ export default function QuizResponderPage() {
                 setErrorMessage(payload.error || "推論エラーが発生しました。");
               }
             } catch {
-              // JSONパース不完全行は無視
+              // ignore
             }
           }
         }
       }
     } catch (err: unknown) {
       if (err instanceof Error && err.name === "AbortError") {
-        console.log("Request aborted");
         return;
       }
-      const message =
-        err instanceof Error ? err.message : "予期せぬエラーが発生しました。";
+      const message = err instanceof Error ? err.message : "予期せぬエラーが発生しました。";
       setErrorMessage(message);
     } finally {
       setIsLoading(false);
@@ -233,50 +397,56 @@ export default function QuizResponderPage() {
   };
 
   /**
-   * ワンタップ撮影キャプチャ
+   * ワンタップ撮影キャプチャ（通常またはバースト連続2枚）
    */
   const handleCapture = async () => {
-    if (isLoading) return; // 連打防止
+    if (isLoading) return;
     if (!videoRef.current || !isCameraReady) {
       setErrorMessage("カメラの準備が整っていません。");
       return;
     }
 
     try {
-      // 1280px WebP (0.75品質) でフレーム取得
-      const blob = await captureVideoFrame(videoRef.current, {
+      const blobs: Blob[] = [];
+
+      // 1枚目キャプチャ
+      const firstBlob = await captureVideoFrame(videoRef.current, {
         maxDimension: 1280,
         quality: 0.75,
         format: "image/webp",
       });
+      blobs.push(firstBlob);
 
-      await executeAnalysis(blob);
+      // バースト（ズームアウト変化検知）モードの場合、0.7秒後に2枚目を取得
+      if (isBurstMode) {
+        await new Promise((resolve) => setTimeout(resolve, 700));
+        if (videoRef.current) {
+          const secondBlob = await captureVideoFrame(videoRef.current, {
+            maxDimension: 1280,
+            quality: 0.75,
+            format: "image/webp",
+          });
+          blobs.push(secondBlob);
+        }
+      }
+
+      await executeAnalysis(blobs);
     } catch (err: unknown) {
-      const msg =
-        err instanceof Error
-          ? err.message
-          : "キャプチャ処理に失敗しました。";
+      const msg = err instanceof Error ? err.message : "キャプチャ処理に失敗しました。";
       setErrorMessage(msg);
     }
   };
 
-  /**
-   * ファイルアップロードによる代替実行
-   */
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      executeAnalysis(file);
+      executeAnalysis([file]);
     }
-    // 入力をリセット
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
   };
 
-  /**
-   * テキストコピー
-   */
   const handleCopy = () => {
     if (!answerRawText) return;
     navigator.clipboard.writeText(answerRawText);
@@ -284,27 +454,22 @@ export default function QuizResponderPage() {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  /**
-   * 結果リセット・再撮影
-   */
   const handleReset = () => {
     setAnswerRawText("");
     setErrorMessage(null);
     setMetaInfo(null);
-    if (capturedImagePreview) {
-      URL.revokeObjectURL(capturedImagePreview);
-      setCapturedImagePreview(null);
-    }
+    setSpeechTranscript("");
+    setManualNote("");
   };
 
-  // テキストを1行目（正解）と2行目以降（解説）に分離
+  // テキストのパース
   const lines = answerRawText.split("\n");
   const firstLine = lines[0]?.trim() || "";
   const explanationLines = lines.slice(1).join("\n").trim();
+  const colorInfo = parseAnswerColor(firstLine);
 
   return (
-    <div className="relative min-h-screen bg-[#080c14] text-gray-100 flex flex-col justify-between">
-      {/* 隠しファイル入力（フォールバック用） */}
+    <div className="relative min-h-screen bg-[#060911] text-gray-100 flex flex-col justify-between">
       <input
         type="file"
         ref={fileInputRef}
@@ -314,51 +479,128 @@ export default function QuizResponderPage() {
       />
 
       {/* ヘッダー */}
-      <header className="z-20 flex items-center justify-between px-4 py-3 bg-[#0d1322]/80 backdrop-blur-md border-b border-gray-800/60 sticky top-0">
-        <div className="flex items-center gap-2">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-emerald-500 to-cyan-400 flex items-center justify-center shadow-lg shadow-emerald-500/20">
-            <Zap className="w-5 h-5 text-[#080c14] fill-[#080c14]" />
+      <header className="z-20 px-3 py-2.5 bg-[#0a0f1d]/90 backdrop-blur-md border-b border-gray-800/80 sticky top-0 flex flex-col gap-2">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-amber-500 via-red-500 to-blue-500 flex items-center justify-center shadow-lg shadow-red-500/20">
+              <Tv className="w-4 h-4 text-white" />
+            </div>
+            <div>
+              <div className="flex items-center gap-1.5">
+                <h1 className="text-sm font-black tracking-tight text-white">
+                  オールスター感謝祭 AI解答器
+                </h1>
+                <span className="text-[10px] bg-red-600/80 text-white font-bold px-1.5 py-0.2 rounded">
+                  dボタン直結
+                </span>
+              </div>
+              <p className="text-[10px] text-gray-400">
+                10秒カウントダウン即答特化 | 1:青 2:赤 3:緑 4:黄
+              </p>
+            </div>
           </div>
-          <div>
-            <h1 className="text-base font-bold tracking-tight bg-gradient-to-r from-emerald-400 to-cyan-300 bg-clip-text text-transparent">
-              QuizFast AI
-            </h1>
-            <p className="text-[10px] text-gray-400 flex items-center gap-1">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
-              Gemini 1.5 Flash リアルタイム推論
-            </p>
-          </div>
-        </div>
 
-        <div className="flex items-center gap-2">
-          {/* カメラ切替 */}
-          {!cameraError && (
+          <div className="flex items-center gap-1.5">
+            {/* マイク聞き取りボタン */}
             <button
-              onClick={toggleFacingMode}
-              disabled={isLoading}
-              title="カメラを切り替え"
-              className="p-2 rounded-lg bg-gray-800/80 hover:bg-gray-700/80 border border-gray-700/60 text-gray-300 hover:text-white transition disabled:opacity-50"
+              onClick={toggleMic}
+              title={isMicActive ? "テレビ音声聞き取り中（タップで停止）" : "テレビ音声聞き取り開始"}
+              className={`p-2 rounded-lg border transition flex items-center gap-1 text-xs font-bold ${
+                isMicActive
+                  ? "bg-red-500/20 border-red-500 text-red-300 animate-pulse"
+                  : "bg-gray-800/80 border-gray-700/60 text-gray-400 hover:text-white"
+              }`}
             >
-              <SwitchCamera className="w-4 h-4" />
+              {isMicActive ? <Mic className="w-4 h-4 text-red-400" /> : <MicOff className="w-4 h-4" />}
             </button>
-          )}
 
-          {/* 画像ファイル選択ボタン */}
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            disabled={isLoading}
-            title="ファイルから読み込み"
-            className="p-2 rounded-lg bg-gray-800/80 hover:bg-gray-700/80 border border-gray-700/60 text-gray-300 hover:text-white transition disabled:opacity-50"
-          >
-            <Upload className="w-4 h-4" />
-          </button>
+            {/* ズームアウト2連写トグル */}
+            <button
+              onClick={() => setIsBurstMode((prev) => !prev)}
+              title="ズームアウト/映像用 2連写モード"
+              className={`p-2 rounded-lg border transition text-xs font-bold flex items-center gap-1 ${
+                isBurstMode
+                  ? "bg-cyan-500/20 border-cyan-400 text-cyan-300"
+                  : "bg-gray-800/80 border-gray-700/60 text-gray-400 hover:text-white"
+              }`}
+            >
+              <Layers className="w-4 h-4" />
+              <span className="text-[10px] hidden sm:inline">{isBurstMode ? "2連写ON" : "通常"}</span>
+            </button>
+
+            {/* カメラ切替 */}
+            {!cameraError && (
+              <button
+                onClick={toggleFacingMode}
+                disabled={isLoading}
+                title="カメラ切替"
+                className="p-2 rounded-lg bg-gray-800/80 hover:bg-gray-700 border border-gray-700/60 text-gray-300 transition"
+              >
+                <SwitchCamera className="w-4 h-4" />
+              </button>
+            )}
+
+            {/* 画像アップロード */}
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={isLoading}
+              title="画像ファイルから解答"
+              className="p-2 rounded-lg bg-gray-800/80 hover:bg-gray-700 border border-gray-700/60 text-gray-300 transition"
+            >
+              <Upload className="w-4 h-4" />
+            </button>
+          </div>
         </div>
+
+        {/* クイック出題ジャンルバー */}
+        <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-[11px] no-scrollbar">
+          {QUIZ_PRESETS.map((preset) => (
+            <button
+              key={preset.id}
+              onClick={() => setSelectedPreset(preset.id)}
+              className={`px-2.5 py-1 rounded-full whitespace-nowrap transition font-semibold border ${
+                selectedPreset === preset.id
+                  ? "bg-gradient-to-r from-red-600 to-amber-600 border-amber-400 text-white shadow-sm"
+                  : "bg-gray-900/80 border-gray-800 text-gray-400 hover:text-gray-200"
+              }`}
+            >
+              {preset.label}
+            </button>
+          ))}
+        </div>
+
+        {/* 音声認識テキスト・手動補足表示（ある場合のみ） */}
+        {(speechTranscript || manualNote || isMicActive) && (
+          <div className="flex items-center gap-2 bg-[#121829] px-2.5 py-1.5 rounded-lg border border-gray-800 text-[11px]">
+            <span className="text-red-400 font-bold shrink-0 flex items-center gap-1">
+              {isMicActive && <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-ping" />}
+              音声/メモ:
+            </span>
+            <input
+              type="text"
+              value={manualNote || speechTranscript}
+              onChange={(e) => setManualNote(e.target.value)}
+              placeholder="司会者のヒントや問題文補足をここに追記可能"
+              className="bg-transparent border-none outline-none text-gray-200 flex-1 text-[11px]"
+            />
+            {(speechTranscript || manualNote) && (
+              <button
+                onClick={() => {
+                  setSpeechTranscript("");
+                  setManualNote("");
+                }}
+                className="text-gray-500 hover:text-gray-300 text-[10px]"
+              >
+                クリア
+              </button>
+            )}
+          </div>
+        )}
       </header>
 
-      {/* メインカメラプレビュー & オーバーレイエリア */}
-      <main className="relative flex-1 flex flex-col items-center justify-center overflow-hidden p-2 sm:p-4">
-        <div className="relative w-full max-w-lg aspect-[3/4] sm:aspect-[4/3] rounded-2xl overflow-hidden bg-black/60 border border-gray-800 shadow-2xl flex items-center justify-center">
-          {/* カメラ映像 */}
+      {/* メインカメラビュー & オーバーレイ */}
+      <main className="relative flex-1 flex flex-col items-center justify-center overflow-hidden p-2">
+        <div className="relative w-full max-w-lg aspect-[3/4] sm:aspect-[4/3] rounded-2xl overflow-hidden bg-black/70 border border-gray-800 shadow-2xl flex items-center justify-center">
           {!cameraError ? (
             <video
               ref={videoRef}
@@ -374,9 +616,7 @@ export default function QuizResponderPage() {
               <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-full text-red-400">
                 <AlertCircle className="w-8 h-8" />
               </div>
-              <p className="text-xs text-gray-300 leading-relaxed">
-                {cameraError}
-              </p>
+              <p className="text-xs text-gray-300 leading-relaxed">{cameraError}</p>
               <div className="flex gap-2 mt-2">
                 <button
                   onClick={() => setCameraReloadKey((k) => k + 1)}
@@ -394,139 +634,122 @@ export default function QuizResponderPage() {
             </div>
           )}
 
-          {/* カメラ読み込み中スピナー */}
           {!isCameraReady && !cameraError && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-[#0a0e17]/80 backdrop-blur-sm z-10">
-              <RefreshCw className="w-7 h-7 text-emerald-400 animate-spin" />
-              <p className="text-xs text-gray-400 font-medium">カメラ起動中...</p>
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-[#060911]/80 backdrop-blur-sm z-10">
+              <RefreshCw className="w-7 h-7 text-amber-400 animate-spin" />
+              <p className="text-xs text-gray-400 font-medium">テレビ画面カメラ起動中...</p>
             </div>
           )}
 
-          {/* クイズ認識ガイド枠（オーバーレイ） */}
+          {/* クイズ認識ガイド枠 */}
           {isCameraReady && !cameraError && (
-            <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-between p-6 z-10">
-              {/* ガイド枠上部 */}
-              <div className="bg-black/50 backdrop-blur-md px-3 py-1 rounded-full border border-gray-700/50 text-[11px] text-gray-300 flex items-center gap-1.5">
-                <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-                <span>問題文と選択肢を中央の枠に合わせてください</span>
+            <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-between p-4 z-10">
+              {/* ガイド上部バッジ */}
+              <div className="bg-black/60 backdrop-blur-md px-3 py-1 rounded-full border border-gray-700/60 text-[11px] text-gray-200 flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-red-500" />
+                <span>dボタン・テレビ問題文を枠内に収めてください</span>
               </div>
 
               {/* 中央ファインダー枠 */}
-              <div className="relative w-[85%] h-[65%] rounded-xl border border-dashed border-emerald-500/40 flex items-center justify-center">
-                {/* 4隅のHUDコーナー */}
-                <div className="absolute -top-1 -left-1 w-5 h-5 border-t-2 border-l-2 border-emerald-400 rounded-tl-sm" />
-                <div className="absolute -top-1 -right-1 w-5 h-5 border-t-2 border-r-2 border-emerald-400 rounded-tr-sm" />
-                <div className="absolute -bottom-1 -left-1 w-5 h-5 border-b-2 border-l-2 border-emerald-400 rounded-bl-sm" />
-                <div className="absolute -bottom-1 -right-1 w-5 h-5 border-b-2 border-r-2 border-emerald-400 rounded-br-sm" />
+              <div className="relative w-[92%] h-[72%] rounded-xl border border-dashed border-amber-400/50 flex items-center justify-center">
+                <div className="absolute -top-1 -left-1 w-6 h-6 border-t-4 border-l-4 border-amber-400 rounded-tl-sm" />
+                <div className="absolute -top-1 -right-1 w-6 h-6 border-t-4 border-r-4 border-amber-400 rounded-tr-sm" />
+                <div className="absolute -bottom-1 -left-1 w-6 h-6 border-b-4 border-l-4 border-amber-400 rounded-bl-sm" />
+                <div className="absolute -bottom-1 -right-1 w-6 h-6 border-b-4 border-r-4 border-amber-400 rounded-br-sm" />
 
-                {/* スキャンレーザーアニメーション（ローディング時） */}
                 {isLoading && (
-                  <div className="absolute inset-x-0 h-0.5 bg-gradient-to-r from-transparent via-cyan-400 to-transparent shadow-[0_0_12px_#22d3ee] animate-scanline" />
+                  <div className="absolute inset-x-0 h-1 bg-gradient-to-r from-transparent via-red-500 to-transparent shadow-[0_0_15px_#ef4444] animate-scanline" />
                 )}
               </div>
 
-              {/* 下部ステータス */}
-              <div className="text-[10px] text-gray-500">
-                1280px 高速WebP圧縮最適化
+              <div className="text-[10px] text-gray-400 bg-black/50 px-2 py-0.5 rounded">
+                {isBurstMode ? "⚡ ズームアウト用 2連写モードON" : "⚡ 1枚高速判定"}
               </div>
             </div>
           )}
         </div>
 
-        {/* 回答表示エリア / ストリーミング結果カード */}
+        {/* 回答表示エリア（dボタンリモコンカラー特大表示） */}
         {(answerRawText || isLoading || errorMessage) && (
-          <div className="w-full max-w-lg mt-3 z-20 animate-in fade-in slide-in-from-bottom-4 duration-300">
-            <div className="rounded-xl bg-[#0f172a]/95 backdrop-blur-xl border border-gray-700/80 p-4 shadow-2xl relative">
+          <div className="w-full max-w-lg mt-2.5 z-20 animate-in fade-in slide-in-from-bottom-3 duration-200">
+            <div className="rounded-2xl bg-[#0d1326]/95 backdrop-blur-2xl border border-gray-700/80 p-4 shadow-2xl relative">
               {/* カードヘッダー */}
-              <div className="flex items-center justify-between border-b border-gray-800 pb-2 mb-3">
+              <div className="flex items-center justify-between border-b border-gray-800 pb-2 mb-2.5">
                 <div className="flex items-center gap-2">
-                  <div className="w-6 h-6 rounded-md bg-emerald-500/20 text-emerald-400 flex items-center justify-center">
+                  <div className="w-6 h-6 rounded-md bg-amber-500/20 text-amber-400 flex items-center justify-center">
                     <Sparkles className="w-3.5 h-3.5" />
                   </div>
-                  <span className="text-xs font-semibold text-gray-200">
-                    {isLoading ? "AIが解析・推論中..." : "回答結果"}
+                  <span className="text-xs font-bold text-gray-200">
+                    {isLoading ? "オールスター感謝祭 解析中..." : "判定完了！リモコンを押してください"}
                   </span>
                 </div>
 
-                <div className="flex items-center gap-3">
-                  {/* 所要時間バッジ */}
+                <div className="flex items-center gap-2">
                   {metaInfo && (
-                    <div className="text-[11px] text-gray-400 flex items-center gap-1 bg-gray-800/80 px-2 py-0.5 rounded-full border border-gray-700/60 font-mono">
+                    <div className="text-[11px] text-gray-300 flex items-center gap-1 bg-black/60 px-2 py-0.5 rounded-full border border-gray-700 font-mono">
                       <Clock className="w-3 h-3 text-cyan-400" />
-                      {metaInfo.ttftMs && (
-                        <span>TTFT: {(metaInfo.ttftMs / 1000).toFixed(2)}s</span>
-                      )}
                       {metaInfo.elapsedMs && (
-                        <span className="text-emerald-400 font-bold">
+                        <span className="text-amber-400 font-black">
                           ⚡ {(metaInfo.elapsedMs / 1000).toFixed(2)}s
                         </span>
                       )}
                     </div>
                   )}
 
-                  {/* コピーボタン */}
                   {answerRawText && (
                     <button
                       onClick={handleCopy}
-                      className="text-gray-400 hover:text-white transition p-1"
+                      className="text-gray-400 hover:text-white p-1"
                       title="回答をコピー"
                     >
-                      {copied ? (
-                        <Check className="w-3.5 h-3.5 text-emerald-400" />
-                      ) : (
-                        <Copy className="w-3.5 h-3.5" />
-                      )}
+                      {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
                     </button>
                   )}
 
-                  {/* リセットボタン */}
-                  <button
-                    onClick={handleReset}
-                    className="text-gray-400 hover:text-white transition p-1"
-                    title="クリア"
-                  >
+                  <button onClick={handleReset} className="text-gray-400 hover:text-white p-1" title="リセット">
                     <RefreshCw className="w-3.5 h-3.5" />
                   </button>
                 </div>
               </div>
 
-              {/* エラー表示 */}
               {errorMessage && (
-                <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-xs text-red-300 flex items-start gap-2 mb-2">
+                <div className="p-2.5 bg-red-500/15 border border-red-500/40 rounded-xl text-xs text-red-300 flex items-start gap-2 mb-2">
                   <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
                   <div>{errorMessage}</div>
                 </div>
               )}
 
-              {/* 1行目: 正解の特大バッジ表示 */}
+              {/* 1行目: リモコンdボタンカラーの特大バッジ表示 */}
               {firstLine && (
-                <div className="mb-3">
-                  <div className="text-[10px] uppercase font-bold tracking-wider text-emerald-400 mb-1">
-                    正解
+                <div className="mb-2.5">
+                  <div className="text-[10px] font-black uppercase tracking-wider text-gray-400 mb-1 flex items-center justify-between">
+                    <span>リモコン推奨ボタン</span>
+                    <span className="text-xs font-bold text-amber-400">{colorInfo.label}</span>
                   </div>
-                  <div className="inline-block bg-gradient-to-r from-emerald-500/20 to-cyan-500/20 border border-emerald-500/50 rounded-lg px-4 py-2 text-xl sm:text-2xl font-black text-emerald-300 shadow-lg shadow-emerald-500/10">
+                  <div
+                    className={`w-full ${colorInfo.bgClass} border-2 ${colorInfo.borderClass} rounded-xl px-4 py-3 text-2xl sm:text-3xl font-black ${colorInfo.textClass} shadow-xl flex items-center justify-center gap-3 text-center`}
+                  >
                     {firstLine}
                   </div>
                 </div>
               )}
 
-              {/* 2行目以降: 解説の表示 */}
+              {/* 2行目以降: 根拠・ひっかけ理由の解説 */}
               {explanationLines && (
                 <div>
-                  <div className="text-[10px] uppercase font-bold tracking-wider text-gray-400 mb-1">
-                    解説
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-1">
+                    根拠・ひっかけ対策
                   </div>
-                  <div className="text-xs sm:text-sm text-gray-200 leading-relaxed bg-[#0b101d] p-3 rounded-lg border border-gray-800 whitespace-pre-wrap">
+                  <div className="text-xs sm:text-sm text-gray-200 leading-relaxed bg-black/60 p-2.5 rounded-xl border border-gray-800 whitespace-pre-wrap">
                     {explanationLines}
                   </div>
                 </div>
               )}
 
-              {/* ストリーミング中の点滅カーソル */}
               {isLoading && !firstLine && (
-                <div className="flex items-center gap-2 py-4 justify-center text-gray-400 text-xs">
-                  <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping" />
-                  <span>画像を送信して推論しています...（目標2〜3秒）</span>
+                <div className="flex items-center gap-2 py-4 justify-center text-amber-300 text-xs font-bold">
+                  <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-ping" />
+                  <span>10秒カウントダウン勝負！超速推論中...（目標2秒）</span>
                 </div>
               )}
             </div>
@@ -534,36 +757,40 @@ export default function QuizResponderPage() {
         )}
       </main>
 
-      {/* フッター操作エリア */}
-      <footer className="z-20 p-4 pb-6 bg-[#090d16]/90 backdrop-blur-md border-t border-gray-800/60 flex flex-col items-center gap-2">
-        <div className="w-full max-w-lg flex items-center justify-center gap-4">
-          {/* ワンタップ「解答を取得」アクションボタン */}
+      {/* フッター操作バー */}
+      <footer className="z-20 p-3 pb-5 bg-[#070b16]/95 backdrop-blur-md border-t border-gray-800/80 flex flex-col items-center gap-2">
+        {/* dボタン 4色ガイドインジケーター */}
+        <div className="w-full max-w-lg grid grid-cols-4 gap-1.5 text-[10px] font-black text-center text-white mb-1">
+          <div className="bg-blue-600/80 py-1 rounded">1 青</div>
+          <div className="bg-red-600/80 py-1 rounded">2 赤</div>
+          <div className="bg-emerald-600/80 py-1 rounded">3 緑</div>
+          <div className="bg-amber-500/80 py-1 rounded text-black font-extrabold">4 黄</div>
+        </div>
+
+        {/* ワンタップ撮影ボタン */}
+        <div className="w-full max-w-lg">
           <button
             onClick={handleCapture}
             disabled={isLoading || !isCameraReady}
-            className={`w-full py-4 rounded-xl font-bold text-base flex items-center justify-center gap-2 shadow-xl transition-all duration-200 active:scale-95 ${
+            className={`w-full py-4 rounded-xl font-black text-lg flex items-center justify-center gap-2 shadow-2xl transition-all duration-150 active:scale-95 ${
               isLoading || !isCameraReady
                 ? "bg-gray-800 text-gray-500 cursor-not-allowed border border-gray-700"
-                : "bg-gradient-to-r from-emerald-500 via-teal-500 to-cyan-500 text-gray-950 hover:brightness-110 shadow-emerald-500/25 animate-glow-pulse"
+                : "bg-gradient-to-r from-red-600 via-amber-500 to-blue-600 text-white hover:brightness-110 shadow-red-500/30 animate-pulse"
             }`}
           >
             {isLoading ? (
               <>
-                <RefreshCw className="w-5 h-5 animate-spin text-gray-400" />
-                <span>高速解析中...</span>
+                <RefreshCw className="w-6 h-6 animate-spin text-white" />
+                <span>オールスター感謝祭 解析中...</span>
               </>
             ) : (
               <>
-                <Camera className="w-5 h-5 text-gray-950 fill-gray-950/20" />
-                <span>ワンタップで解答を取得</span>
+                <Camera className="w-6 h-6 text-white" />
+                <span>ワンタップで解答！（dボタン判定）</span>
               </>
             )}
           </button>
         </div>
-
-        <p className="text-[10px] text-gray-500 text-center">
-          ※ 撮影画像は回答推論にのみ使用され、サーバー上に永続保存されません。
-        </p>
       </footer>
     </div>
   );

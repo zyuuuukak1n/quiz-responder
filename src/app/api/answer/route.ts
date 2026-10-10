@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { defaultRateLimiter } from "@/lib/rateLimiter";
 import { validateImageBuffer } from "@/lib/validation";
-import { streamQuizAnswer } from "@/lib/gemini";
-
+import { streamQuizAnswer, ImageInputItem } from "@/lib/gemini";
 
 /**
  * 構造化ログ出力ヘルパー
@@ -35,11 +34,9 @@ function logEvent(data: {
 function maskIp(ip: string): string {
   if (!ip) return "unknown";
   if (ip.includes(":")) {
-    // IPv6
     const parts = ip.split(":");
     return parts.slice(0, 3).join(":") + ":****";
   }
-  // IPv4
   const parts = ip.split(".");
   if (parts.length === 4) {
     return `${parts[0]}.${parts[1]}.*.*`;
@@ -90,33 +87,12 @@ export async function POST(request: NextRequest) {
   }
 
   // 2. アップロードデータの取得 & バリデーション
-  let fileBuffer: Uint8Array;
-  let declaredMimeType: string | undefined;
+  const imageInputs: ImageInputItem[] = [];
+  let contextText: string | undefined;
 
   try {
     const contentType = request.headers.get("content-type") || "";
-    if (contentType.includes("multipart/form-data")) {
-      const formData = await request.formData();
-      const file = formData.get("image");
-
-      if (!file || !(file instanceof Blob)) {
-        logEvent({
-          level: "warn",
-          requestId,
-          clientIpMasked,
-          status: 400,
-          message: "画像ファイルが送信されていません。",
-        });
-        return NextResponse.json(
-          { error: "有効な画像ファイル（image）を添付してください。" },
-          { status: 400 }
-        );
-      }
-
-      declaredMimeType = file.type;
-      const arrayBuffer = await file.arrayBuffer();
-      fileBuffer = new Uint8Array(arrayBuffer);
-    } else {
+    if (!contentType.includes("multipart/form-data")) {
       logEvent({
         level: "warn",
         requestId,
@@ -126,6 +102,62 @@ export async function POST(request: NextRequest) {
       });
       return NextResponse.json(
         { error: "Content-Type は multipart/form-data である必要があります。" },
+        { status: 400 }
+      );
+    }
+
+    const formData = await request.formData();
+    contextText = (formData.get("context") as string) || undefined;
+
+    // 単一または複数の画像ファイルを取得
+    const files = formData.getAll("image").concat(formData.getAll("images"));
+
+    if (files.length === 0) {
+      logEvent({
+        level: "warn",
+        requestId,
+        clientIpMasked,
+        status: 400,
+        message: "画像ファイルが送信されていません。",
+      });
+      return NextResponse.json(
+        { error: "有効な画像ファイル（image）を添付してください。" },
+        { status: 400 }
+      );
+    }
+
+    // 最大3フレームまで処理
+    const targetFiles = files.slice(0, 3);
+
+    for (const file of targetFiles) {
+      if (!(file instanceof Blob)) continue;
+
+      const arrayBuffer = await file.arrayBuffer();
+      const fileBuffer = new Uint8Array(arrayBuffer);
+
+      // マジックナンバー & サイズ検証
+      const validation = validateImageBuffer(fileBuffer, file.type);
+      if (!validation.isValid) {
+        logEvent({
+          level: "warn",
+          requestId,
+          clientIpMasked,
+          status: 400,
+          message: "画像バリデーション不合格",
+          error: validation.error,
+        });
+        return NextResponse.json({ error: validation.error }, { status: 400 });
+      }
+
+      imageInputs.push({
+        base64Data: Buffer.from(fileBuffer).toString("base64"),
+        mimeType: validation.detectedMimeType!,
+      });
+    }
+
+    if (imageInputs.length === 0) {
+      return NextResponse.json(
+        { error: "有効な画像データが解析できませんでした。" },
         { status: 400 }
       );
     }
@@ -145,24 +177,7 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // 3. 防御的バイナリバリデーション（サイズ & マジックナンバー）
-  const validation = validateImageBuffer(fileBuffer, declaredMimeType);
-  if (!validation.isValid) {
-    logEvent({
-      level: "warn",
-      requestId,
-      clientIpMasked,
-      status: 400,
-      message: "画像バリデーション不合格",
-      error: validation.error,
-    });
-    return NextResponse.json({ error: validation.error }, { status: 400 });
-  }
-
-  const verifiedMimeType = validation.detectedMimeType!;
-  const base64Data = Buffer.from(fileBuffer).toString("base64");
-
-  // 4. SSEストリーミングレスポンス構築
+  // 3. SSEストリーミングレスポンス構築
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
@@ -172,13 +187,12 @@ export async function POST(request: NextRequest) {
 
         // Gemini 1.5 Flash へのストリーミング推論（7秒タイムアウト設定済み）
         for await (const chunk of streamQuizAnswer({
-          base64Data,
-          mimeType: verifiedMimeType,
+          images: imageInputs,
+          contextText,
         })) {
           if (!firstTokenTime) {
             firstTokenTime = Date.now();
             const ttftMs = firstTokenTime - startTime;
-            // 最初のトークン到達イベント
             controller.enqueue(
               encoder.encode(
                 `data: ${JSON.stringify({
@@ -217,7 +231,9 @@ export async function POST(request: NextRequest) {
           clientIpMasked,
           durationMs: totalElapsedMs,
           status: 200,
-          message: `クイズ解答ストリーミング完了 (トークン数: ${tokenCount}, TTFT: ${
+          message: `オールスター感謝祭解答ストリーミング完了 (画像数: ${
+            imageInputs.length
+          }, トークン数: ${tokenCount}, TTFT: ${
             firstTokenTime ? firstTokenTime - startTime : 0
           }ms)`,
         });
@@ -226,7 +242,7 @@ export async function POST(request: NextRequest) {
           streamError instanceof Error
             ? streamError.message
             : "推論中にエラーが発生しました。";
-        
+
         logEvent({
           level: "error",
           requestId,
@@ -237,15 +253,13 @@ export async function POST(request: NextRequest) {
           error: errorMsg,
         });
 
-        // SSEプロトコル内で安全なエラーを通知
         controller.enqueue(
           encoder.encode(
             `data: ${JSON.stringify({
               type: "error",
-              error:
-                errorMsg.includes("タイムアウト")
-                  ? "サーバー応答がタイムアウトしました。もう一度撮影してください。"
-                  : "AI解答の生成中にエラーが発生しました。時間をおいて再試行してください。",
+              error: errorMsg.includes("タイムアウト")
+                ? "サーバー応答がタイムアウトしました。もう一度撮影してください。"
+                : "AI解答の生成中にエラーが発生しました。時間をおいて再試行してください。",
             })}\n\n`
           )
         );
@@ -259,7 +273,7 @@ export async function POST(request: NextRequest) {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
-      "X-Accel-Buffering": "no", // Nginx / Apache2 プロキシでのバッファリング無効化
+      "X-Accel-Buffering": "no",
     },
   });
 }

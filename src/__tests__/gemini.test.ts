@@ -10,8 +10,8 @@ vi.mock("@google/generative-ai", () => {
           generateContentStream: vi.fn().mockImplementation(async () => {
             return {
               stream: (async function* () {
-                yield { text: () => "A\n" };
-                yield { text: () => "解説: 問題文の条件より選択肢Aが妥当です。" };
+                yield { text: () => "【2】 赤（織田信長）\n" };
+                yield { text: () => "解説: 画面の肖像画と火縄銃の特徴より織田信長が正解です。" };
               })(),
             };
           }),
@@ -21,22 +21,28 @@ vi.mock("@google/generative-ai", () => {
   };
 });
 
-describe("gemini.ts - Gemini 1.5 Flash 推論クライアント", () => {
+describe("gemini.ts - オールスター感謝祭 特化型推論クライアント", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     delete process.env.GEMINI_API_KEY;
   });
 
-  it("システムプロンプトが1行目の正解と2行目の解説（前置き禁止）を規定していること", () => {
-    expect(SYSTEM_PROMPT).toContain("1行目: 正解のみ");
-    expect(SYSTEM_PROMPT).toContain("2行目以降: 簡潔な解説");
-    expect(SYSTEM_PROMPT).toContain("挨拶、前置き");
+  it("システムプロンプトがオールスター感謝祭のdボタン番号・省略文復元・引っかけ警戒を規定していること", () => {
+    expect(SYSTEM_PROMPT).toContain("オールスター感謝祭");
+    expect(SYSTEM_PROMPT).toContain("リモコン4択番号");
+    expect(SYSTEM_PROMPT).toContain("省略された問題文");
+    expect(SYSTEM_PROMPT).toContain("引っかけ・ニッチ問題");
+    expect(SYSTEM_PROMPT).toContain("ズームアウト");
   });
 
   it("APIキーが未設定の場合に適切な例外を送出すること（防御的設計）", async () => {
     const generator = streamQuizAnswer({
-      base64Data: "dGVzdA==",
-      mimeType: "image/webp",
+      images: [
+        {
+          base64Data: "dGVzdA==",
+          mimeType: "image/webp",
+        },
+      ],
     });
 
     await expect(generator.next()).rejects.toThrow(
@@ -46,8 +52,13 @@ describe("gemini.ts - Gemini 1.5 Flash 推論クライアント", () => {
 
   it("モックされたGemini APIからストリーミングチャンクを逐次取得できること", async () => {
     const generator = streamQuizAnswer({
-      base64Data: "dGVzdA==",
-      mimeType: "image/webp",
+      images: [
+        {
+          base64Data: "dGVzdA==",
+          mimeType: "image/webp",
+        },
+      ],
+      contextText: "ズームアウト問題です",
       apiKey: "test-mock-api-key",
     });
 
@@ -57,7 +68,7 @@ describe("gemini.ts - Gemini 1.5 Flash 推論クライアント", () => {
     }
 
     expect(chunks.length).toBe(2);
-    expect(chunks[0]).toBe("A\n");
-    expect(chunks[1]).toContain("解説: 問題文の条件より");
+    expect(chunks[0]).toBe("【2】 赤（織田信長）\n");
+    expect(chunks[1]).toContain("画面の肖像画");
   });
 });
