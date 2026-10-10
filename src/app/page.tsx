@@ -130,6 +130,41 @@ export default function QuizResponderPage() {
   const [manualNote, setManualNote] = useState("");
   const [isFlashEffect, setIsFlashEffect] = useState(false);
 
+  // クイズ説明・前提ルール（リセットボタンを押すまで維持・localStorage連動）
+  const [quizDescription, setQuizDescription] = useState("");
+
+  // 初回マウント時に localStorage から復元
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("quiz_responder_description");
+      if (saved) {
+        setTimeout(() => {
+          setQuizDescription(saved);
+        }, 0);
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const updateQuizDescription = useCallback((text: string) => {
+    setQuizDescription(text);
+    try {
+      localStorage.setItem("quiz_responder_description", text);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const clearQuizDescription = useCallback(() => {
+    setQuizDescription("");
+    try {
+      localStorage.removeItem("quiz_responder_description");
+    } catch {
+      // ignore
+    }
+  }, []);
+
   // VTR完全録画（MediaRecorder）ステート
   const [isVtrRecording, setIsVtrRecording] = useState(false);
   const [vtrRecordSeconds, setVtrRecordSeconds] = useState(0);
@@ -426,6 +461,9 @@ export default function QuizResponderPage() {
 
       const preset = QUIZ_PRESETS.find((p) => p.id === selectedPreset);
       const contextParts: string[] = [];
+      if (quizDescription.trim()) {
+        contextParts.push(`【クイズの事前説明・企画前提ルール】: ${quizDescription.trim()}`);
+      }
       if (preset && preset.id !== "normal") {
         contextParts.push(`【出題ジャンル・特性】: ${preset.prompt}`);
       }
@@ -506,7 +544,7 @@ export default function QuizResponderPage() {
         recordedChunksRef.current = [];
       }
     },
-    [selectedPreset, speechTranscript, manualNote]
+    [selectedPreset, speechTranscript, manualNote, quizDescription]
   );
 
   /**
@@ -610,7 +648,7 @@ export default function QuizResponderPage() {
         return;
       }
 
-      // R: 結果リセット
+      // R: 結果 & 説明リセット [R]
       if (e.key === "r" || e.key === "R") {
         e.preventDefault();
         setAnswerRawText("");
@@ -618,12 +656,16 @@ export default function QuizResponderPage() {
         setMetaInfo(null);
         recordedChunksRef.current = [];
         setIsVtrRecording(false);
+        clearQuizDescription();
+        setSpeechTranscript("");
+        setManualNote("");
         return;
       }
 
-      // C: 音声メモ・手動メモのクリア
+      // C: 説明・メモのクリア [C]
       if (e.key === "c" || e.key === "C") {
         e.preventDefault();
+        clearQuizDescription();
         setSpeechTranscript("");
         setManualNote("");
         return;
@@ -642,13 +684,10 @@ export default function QuizResponderPage() {
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [handleCapture, toggleMic, toggleVtrRecording]);
+  }, [handleCapture, toggleMic, toggleVtrRecording, clearQuizDescription]);
 
   const addConditionTag = (tag: string) => {
-    setManualNote((prev) => {
-      if (prev.includes(tag)) return prev;
-      return `${prev} ${tag}`.trim();
-    });
+    updateQuizDescription(quizDescription ? `${quizDescription} ${tag}` : tag);
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -676,6 +715,7 @@ export default function QuizResponderPage() {
     setManualNote("");
     recordedChunksRef.current = [];
     setIsVtrRecording(false);
+    clearQuizDescription();
   };
 
   const lines = answerRawText.split("\n");
@@ -811,47 +851,74 @@ export default function QuizResponderPage() {
           ))}
         </div>
 
-        {/* 単位・条件クイック補完チップ */}
-        <div className="flex items-center gap-1 overflow-x-auto text-[10px] no-scrollbar py-0.5">
-          <span className="text-gray-400 font-bold shrink-0">省略補完:</span>
-          {QUICK_CONDITION_TAGS.map((tag) => (
-            <button
-              key={tag}
-              onClick={() => addConditionTag(tag)}
-              className="px-2 py-0.5 rounded bg-gray-800/90 hover:bg-gray-700 text-gray-300 hover:text-white border border-gray-700 whitespace-nowrap transition"
-            >
-              +{tag}
-            </button>
-          ))}
+        {/* クイズ説明・前提ルール（リセットボタンを押すまで維持・localStorage連動） */}
+        <div className="bg-[#0b1020] rounded-xl border border-gray-700/80 p-2 shadow-inner flex flex-col gap-1.5">
+          <div className="flex items-center justify-between text-[11px]">
+            <div className="flex items-center gap-1.5 font-bold text-gray-200">
+              <span className="text-amber-400">📝 クイズ説明・前提ルール</span>
+              <span className="text-[10px] text-gray-400 font-normal">（リセットボタンを押すまで毎問維持）</span>
+            </div>
+            <div className="flex items-center gap-2">
+              {quizDescription && (
+                <span className="text-[10px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 px-1.5 py-0.5 rounded-full font-bold flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+                  ルール常時適用中
+                </span>
+              )}
+              {quizDescription && (
+                <button
+                  onClick={clearQuizDescription}
+                  title="説明テキストをリセット [C]"
+                  className="text-gray-400 hover:text-red-400 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 flex items-center gap-0.5 transition"
+                >
+                  <X className="w-3 h-3" />
+                  <span>クリア</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          <textarea
+            ref={manualNoteInputRef as unknown as React.RefObject<HTMLTextAreaElement>}
+            value={quizDescription}
+            onChange={(e) => updateQuizDescription(e.target.value)}
+            rows={2}
+            placeholder="例:「漢字の総画数が多い順」「重い順に選ぶ」「ミニマラソン優勝予想」「NGを出した人の選択肢」など、ピリオドのルールや事前説明を入力（※回答後も消えずに維持されます）"
+            className="w-full bg-[#050811] border border-gray-700/80 focus:border-amber-400 rounded-lg px-2.5 py-1.5 text-xs text-gray-100 placeholder-gray-500 outline-none resize-none leading-relaxed transition"
+          />
+
+          {/* 単位・条件クイック追加チップ（タップで説明欄に即時追記） */}
+          <div className="flex items-center gap-1 overflow-x-auto text-[10px] no-scrollbar pt-0.5">
+            <span className="text-gray-400 font-bold shrink-0">定型追加:</span>
+            {QUICK_CONDITION_TAGS.map((tag) => (
+              <button
+                key={tag}
+                onClick={() => addConditionTag(tag)}
+                className="px-2 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white border border-gray-700 whitespace-nowrap transition"
+              >
+                +{tag}
+              </button>
+            ))}
+          </div>
         </div>
 
-        {/* 音声文字起こし & 手動メモ欄 */}
-        <div className="flex items-center gap-2 bg-[#0d1326] px-2.5 py-1.5 rounded-lg border border-gray-800 text-[11px]">
-          <span className="text-red-400 font-bold shrink-0 flex items-center gap-1">
-            {isMicActive && <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-ping" />}
-            司会音声/補足:
-          </span>
-          <input
-            ref={manualNoteInputRef}
-            type="text"
-            value={manualNote || speechTranscript}
-            onChange={(e) => setManualNote(e.target.value)}
-            placeholder="テレビから聞こえた問題文・単位（何m/何人/誰）を追記"
-            className="bg-transparent border-none outline-none text-gray-200 flex-1 text-[11px] placeholder-gray-500"
-          />
-          {(speechTranscript || manualNote) && (
+        {/* マイク自動文字起こし（音声が入った場合のみ表示） */}
+        {speechTranscript && (
+          <div className="flex items-center gap-2 bg-[#090e1c] px-2.5 py-1 rounded-lg border border-red-500/30 text-[11px]">
+            <span className="text-red-400 font-bold shrink-0 flex items-center gap-1">
+              {isMicActive && <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-ping" />}
+              マイク拾い上げ:
+            </span>
+            <span className="text-gray-300 truncate flex-1 font-mono text-[10px]">{speechTranscript}</span>
             <button
-              onClick={() => {
-                setSpeechTranscript("");
-                setManualNote("");
-              }}
-              title="クリア [C]"
+              onClick={() => setSpeechTranscript("")}
+              title="マイク文字起こしをクリア"
               className="text-gray-400 hover:text-white p-0.5"
             >
-              <X className="w-3.5 h-3.5" />
+              <X className="w-3 h-3" />
             </button>
-          )}
-        </div>
+          </div>
+        )}
       </header>
 
       {/* メインカメラプレビュー & オーバーレイエリア */}
@@ -1004,6 +1071,14 @@ export default function QuizResponderPage() {
                   <div className="text-xs sm:text-sm text-gray-200 leading-relaxed bg-black/60 p-2.5 rounded-xl border border-gray-800 whitespace-pre-wrap">
                     {explanationLines}
                   </div>
+                </div>
+              )}
+
+              {/* 適用された前提ルール表示 */}
+              {quizDescription && (
+                <div className="mt-2 pt-2 border-t border-gray-800 flex items-center gap-1.5 text-[10px] text-emerald-400">
+                  <span className="font-bold shrink-0">📌 適用ルール:</span>
+                  <span className="text-gray-300 font-mono truncate">{quizDescription}</span>
                 </div>
               )}
 
