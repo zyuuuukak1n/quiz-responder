@@ -21,18 +21,19 @@ vi.mock("@google/generative-ai", () => {
   };
 });
 
-describe("gemini.ts - オールスター感謝祭 特化型推論クライアント", () => {
+describe("gemini.ts - オールスター感謝祭 完全制覇エンジン (gemini-3.5-flash-lite)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     delete process.env.GEMINI_API_KEY;
   });
 
-  it("システムプロンプトがオールスター感謝祭のdボタン番号・単位や問題文省略復元・引っかけ警戒を規定していること", () => {
+  it("システムプロンプトがVTR映像解析・超ひっかけなぞなぞ・ビジュアル・出演者・単位逆算を網羅していること", () => {
     expect(SYSTEM_PROMPT).toContain("オールスター感謝祭");
     expect(SYSTEM_PROMPT).toContain("リモコン4択番号");
-    expect(SYSTEM_PROMPT).toContain("単位・比較条件・問題文の省略");
-    expect(SYSTEM_PROMPT).toContain("引っかけ・ニッチ問題");
+    expect(SYSTEM_PROMPT).toContain("VTRタイムシフト解析");
+    expect(SYSTEM_PROMPT).toContain("超ひっかけ問題・なぞなぞ");
     expect(SYSTEM_PROMPT).toContain("ズームアウト");
+    expect(SYSTEM_PROMPT).toContain("単位・条件・問題文省略の逆算・復元");
   });
 
   it("APIキーが未設定の場合に適切な例外を送出すること（防御的設計）", async () => {
@@ -50,15 +51,14 @@ describe("gemini.ts - オールスター感謝祭 特化型推論クライアン
     );
   });
 
-  it("モックされたGemini APIからストリーミングチャンクを逐次取得できること", async () => {
+  it("複数VTRフレームと最終画面をモックAPIでストリーミング推論できること", async () => {
     const generator = streamQuizAnswer({
       images: [
-        {
-          base64Data: "dGVzdA==",
-          mimeType: "image/webp",
-        },
+        { base64Data: "ZnJhbWUx", mimeType: "image/webp" },
+        { base64Data: "ZnJhbWUy", mimeType: "image/webp" },
+        { base64Data: "cXVlc3Rpb24=", mimeType: "image/webp" },
       ],
-      contextText: "ズームアウト問題です",
+      contextText: "VTR問題: このあと誰が転んだか",
       apiKey: "test-mock-api-key",
     });
 

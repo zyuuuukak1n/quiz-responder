@@ -126,8 +126,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 最大3フレームまで処理
-    const targetFiles = files.slice(0, 3);
+    // 最大10フレームまで処理（VTRタイムシフト＋出題画面）
+    const targetFiles = files.slice(0, 10);
 
     for (const file of targetFiles) {
       if (!(file instanceof Blob)) continue;

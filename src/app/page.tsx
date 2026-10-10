@@ -17,6 +17,8 @@ import {
   Tv,
   Keyboard,
   X,
+  Video,
+  VideoOff,
 } from "lucide-react";
 import { captureVideoFrame } from "@/lib/imageUtils";
 
@@ -25,16 +27,17 @@ interface StreamResponseMeta {
   elapsedMs?: number;
 }
 
-// オールスター感謝祭・ジャンルプリセット
+// オールスター感謝祭・ジャンルプリセット（全タイプ完全網羅）
 const QUIZ_PRESETS = [
-  { id: "normal", key: "1", label: "標準4択", prompt: "オールスター感謝祭の標準4択問題" },
-  { id: "zoom", key: "2", label: "🔍 ズームアウト/写真", prompt: "ズームアウト問題または画像特定問題。パーツや色・輪郭の特徴から全体の正解を特定せよ。" },
-  { id: "trick", key: "3", label: "⚠️ ひっかけ・意地悪", prompt: "意地悪・引っかけ問題。ありがちな直感の間違いを徹底警戒し、真の事実関係で判断せよ。" },
-  { id: "person_song", key: "4", label: "🎤 人物/曲名/過去映像", prompt: "人物当て・曲名・セリフ・過去のTBS名場面問題。" },
-  { id: "prediction", key: "5", label: "🏃 勝敗/順位予想", prompt: "スタジオ生対決・マラソン等の勝敗・順位予想問題。" },
+  { id: "normal", key: "1", label: "標準4択", prompt: "オールスター感謝祭の標準4択問題。" },
+  { id: "zoom", key: "2", label: "🔍 ズームアウト/写真", prompt: "ズームアウト問題または画像特定問題。パーツや色・輪郭の特徴から全体の被写体を即断せよ。" },
+  { id: "trick", key: "3", label: "⚠️ 超ひっかけ/なぞなぞ", prompt: "超ひっかけ・なぞなぞ・言葉遊び問題。直感的な罠を排除し、文字の構造や真の事実から解け。" },
+  { id: "vtr", key: "4", label: "🎬 VTR映像/NG/変化", prompt: "VTR映像問題（このあと何が起きた？変化した部分は？NGは誰？）。時系列の流れを追って解け。" },
+  { id: "cast_tbs", key: "5", label: "🎤 出演者/TBSネタ/曲", prompt: "出演タレント、MC（今田・島崎）、TBS歴代番組、曲名、過去の名場面問題。" },
+  { id: "prediction", key: "6", label: "🏃 勝敗/順位予想", prompt: "スタジオ生対決・マラソン等の勝敗・順位予想問題。" },
 ] as const;
 
-// 単位・問いの条件クイック追加チップ（画面で省略されている場合のワンクリック補完）
+// 単位・問いの条件クイック追加チップ
 const QUICK_CONDITION_TAGS = [
   "📏 何m/cm (長さ・高さ)",
   "⚖️ 何kg/g (重さ)",
@@ -45,6 +48,7 @@ const QUICK_CONDITION_TAGS = [
   "⬆️ 一番多い/高い",
   "⬇️ 一番少ない/低い",
   "❌ 該当しないもの",
+  "🧩 なぞなぞ・言葉遊び",
 ];
 
 // リモコンカラー判定ヘルパー
@@ -120,11 +124,16 @@ export default function QuizResponderPage() {
 
   // オールスター感謝祭・制御ステート
   const [selectedPreset, setSelectedPreset] = useState<string>("normal");
-  const [isBurstMode, setIsBurstMode] = useState(false); // 2連写（ズームアウト用）
+  const [isBurstMode, setIsBurstMode] = useState(false); // 2連写
   const [isMicActive, setIsMicActive] = useState(false); // 音声聞き取り
   const [speechTranscript, setSpeechTranscript] = useState(""); // 音声文字起こし
   const [manualNote, setManualNote] = useState(""); // 手動補足メモ
-  const [isFlashEffect, setIsFlashEffect] = useState(false); // 撮影時シャッターフラッシュ
+  const [isFlashEffect, setIsFlashEffect] = useState(false); // シャッターフラッシュ
+
+  // VTRキーフレーム蓄積（タイムシフト）ステート
+  const [isVtrRecording, setIsVtrRecording] = useState(false);
+  const [vtrFrameCount, setVtrFrameCount] = useState(0);
+  const vtrFramesRef = useRef<Blob[]>([]);
 
   // 解析・推論ステート
   const [isLoading, setIsLoading] = useState(false);
@@ -165,7 +174,7 @@ export default function QuizResponderPage() {
         if (transcript.trim()) {
           setSpeechTranscript((prev) => {
             const combined = `${prev} ${transcript}`.trim();
-            return combined.slice(-180);
+            return combined.slice(-200);
           });
         }
       };
@@ -202,7 +211,7 @@ export default function QuizResponderPage() {
 
   const toggleMic = useCallback(() => {
     if (!recognitionRef.current) {
-      alert("お使いのブラウザは音声認識APIに対応していません。手動メモ欄またはショートカットをご利用ください。");
+      alert("お使いのブラウザは音声認識APIに対応していません。手動メモ欄をご利用ください。");
       return;
     }
 
@@ -222,6 +231,58 @@ export default function QuizResponderPage() {
       }
     }
   }, [isMicActive]);
+
+  /**
+   * VTRキーフレーム蓄積ループ（1.2秒おきに自動キャプチャ、最大6枚）
+   */
+  useEffect(() => {
+    if (!isVtrRecording) return;
+
+    const captureVtrFrame = async () => {
+      if (videoRef.current && isCameraReady) {
+        try {
+          const blob = await captureVideoFrame(videoRef.current, {
+            maxDimension: 1280,
+            quality: 0.7,
+            format: "image/webp",
+          });
+          // 最新6枚を保持するリングバッファ
+          const current = [...vtrFramesRef.current, blob];
+          if (current.length > 6) {
+            current.shift();
+          }
+          vtrFramesRef.current = current;
+          setVtrFrameCount(current.length);
+        } catch (e) {
+          console.warn("VTR frame capture error:", e);
+        }
+      }
+    };
+
+    // 開始直後に1枚目
+    captureVtrFrame();
+
+    // 1.2秒ごとに継続
+    const timerId = setInterval(captureVtrFrame, 1200);
+
+    return () => {
+      clearInterval(timerId);
+    };
+  }, [isVtrRecording, isCameraReady]);
+
+  const toggleVtrRecording = useCallback(() => {
+    setIsVtrRecording((prev) => {
+      if (!prev) {
+        // 開始時はバッファクリア
+        vtrFramesRef.current = [];
+        setVtrFrameCount(0);
+        setSelectedPreset("vtr"); // 自動でVTRジャンルに切り替え
+        return true;
+      } else {
+        return false;
+      }
+    });
+  }, []);
 
   /**
    * カメラの初期化Effect
@@ -312,7 +373,6 @@ export default function QuizResponderPage() {
       navigator.vibrate(40);
     }
 
-    // 視覚的シャッターフラッシュ
     setIsFlashEffect(true);
     setTimeout(() => setIsFlashEffect(false), 150);
 
@@ -320,6 +380,9 @@ export default function QuizResponderPage() {
     setErrorMessage(null);
     setAnswerRawText("");
     setMetaInfo(null);
+
+    // VTR記録中だった場合は停止
+    setIsVtrRecording(false);
 
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
@@ -411,11 +474,14 @@ export default function QuizResponderPage() {
     } finally {
       setIsLoading(false);
       abortControllerRef.current = null;
+      // VTRバッファをリセット
+      vtrFramesRef.current = [];
+      setVtrFrameCount(0);
     }
   }, [selectedPreset, speechTranscript, manualNote]);
 
   /**
-   * キャプチャ実行（通常またはバースト連続2枚）
+   * キャプチャ実行（VTR蓄積フレーム＋現在の出題画面をまとめて送信）
    */
   const handleCapture = useCallback(async () => {
     if (isLoading) return;
@@ -425,15 +491,18 @@ export default function QuizResponderPage() {
     }
 
     try {
-      const blobs: Blob[] = [];
+      // 1. 蓄積されたVTRフレーム群（あれば）
+      const blobs: Blob[] = [...vtrFramesRef.current];
 
-      const firstBlob = await captureVideoFrame(videoRef.current, {
+      // 2. 現在の出題・4択画面フレーム
+      const currentBlob = await captureVideoFrame(videoRef.current, {
         maxDimension: 1280,
         quality: 0.75,
         format: "image/webp",
       });
-      blobs.push(firstBlob);
+      blobs.push(currentBlob);
 
+      // 3. 2連写モードの場合、0.7秒後にさらにもう1枚追加
       if (isBurstMode) {
         await new Promise((resolve) => setTimeout(resolve, 700));
         if (videoRef.current) {
@@ -458,7 +527,6 @@ export default function QuizResponderPage() {
    */
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // input等のフォーカス中は文字入力を優先
       const activeEl = document.activeElement;
       if (activeEl && (activeEl.tagName === "INPUT" || activeEl.tagName === "TEXTAREA")) {
         if (e.key === "Escape") {
@@ -471,6 +539,13 @@ export default function QuizResponderPage() {
       if (e.code === "Space" || e.code === "Enter") {
         e.preventDefault();
         handleCapture();
+        return;
+      }
+
+      // V: VTR記録開始/停止トグル
+      if (e.key === "v" || e.key === "V") {
+        e.preventDefault();
+        toggleVtrRecording();
         return;
       }
 
@@ -494,6 +569,9 @@ export default function QuizResponderPage() {
         setAnswerRawText("");
         setErrorMessage(null);
         setMetaInfo(null);
+        vtrFramesRef.current = [];
+        setVtrFrameCount(0);
+        setIsVtrRecording(false);
         return;
       }
 
@@ -505,7 +583,7 @@ export default function QuizResponderPage() {
         return;
       }
 
-      // 1〜5: ジャンルプリセット切り替え
+      // 1〜6: ジャンルプリセット切り替え
       const foundPreset = QUIZ_PRESETS.find((p) => p.key === e.key);
       if (foundPreset) {
         e.preventDefault();
@@ -518,9 +596,8 @@ export default function QuizResponderPage() {
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [handleCapture, toggleMic]);
+  }, [handleCapture, toggleMic, toggleVtrRecording]);
 
-  // 単位タグの追加
   const addConditionTag = (tag: string) => {
     setManualNote((prev) => {
       if (prev.includes(tag)) return prev;
@@ -551,9 +628,11 @@ export default function QuizResponderPage() {
     setMetaInfo(null);
     setSpeechTranscript("");
     setManualNote("");
+    vtrFramesRef.current = [];
+    setVtrFrameCount(0);
+    setIsVtrRecording(false);
   };
 
-  // テキストパース
   const lines = answerRawText.split("\n");
   const firstLine = lines[0]?.trim() || "";
   const explanationLines = lines.slice(1).join("\n").trim();
@@ -561,7 +640,6 @@ export default function QuizResponderPage() {
 
   return (
     <div className="relative min-h-screen bg-[#050811] text-gray-100 flex flex-col justify-between">
-      {/* 撮影時シャッターフラッシュ効果 */}
       {isFlashEffect && <div className="fixed inset-0 bg-white/40 z-50 pointer-events-none transition-opacity" />}
 
       <input
@@ -582,19 +660,42 @@ export default function QuizResponderPage() {
             <div>
               <div className="flex items-center gap-1.5">
                 <h1 className="text-sm font-black tracking-tight text-white">
-                  オールスター感謝祭 AI超速判定
+                  オールスター感謝祭 AI完全制覇
                 </h1>
                 <span className="text-[10px] bg-red-600 text-white font-extrabold px-1.5 py-0.2 rounded shadow-sm">
-                  dボタン直結
+                  gemini-3.5-flash-lite
                 </span>
               </div>
               <p className="text-[10px] text-gray-400">
-                単位・問題文省略逆算復元 | 10秒タイマー即答
+                VTRタイムシフト・超ひっかけ・ビジュアル・全問題完全対応
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-1.5">
+            {/* 🎥 VTRタイムシフト記録ボタン [V] */}
+            <button
+              onClick={toggleVtrRecording}
+              title="VTR映像記録 [V]（司会者の『映像をご覧ください』で押す）"
+              className={`px-2.5 py-1.5 rounded-lg border transition flex items-center gap-1.5 text-xs font-black ${
+                isVtrRecording
+                  ? "bg-red-600 border-red-400 text-white animate-pulse shadow-lg shadow-red-600/40"
+                  : "bg-gray-800/90 border-gray-700/80 text-gray-300 hover:text-white hover:bg-gray-700"
+              }`}
+            >
+              {isVtrRecording ? (
+                <>
+                  <Video className="w-4 h-4 text-white animate-bounce" />
+                  <span>VTR記録中 ({vtrFrameCount}枚)</span>
+                </>
+              ) : (
+                <>
+                  <VideoOff className="w-4 h-4 text-gray-400" />
+                  <span>VTR記録 [V]</span>
+                </>
+              )}
+            </button>
+
             {/* マイク聞き取りボタン [M] */}
             <button
               onClick={toggleMic}
@@ -613,14 +714,14 @@ export default function QuizResponderPage() {
             <button
               onClick={() => setIsBurstMode((prev) => !prev)}
               title="ズームアウト/映像 2連写モード [B]"
-              className={`px-2.5 py-1.5 rounded-lg border transition text-xs font-bold flex items-center gap-1 ${
+              className={`px-2 py-1.5 rounded-lg border transition text-xs font-bold flex items-center gap-1 ${
                 isBurstMode
                   ? "bg-cyan-500/25 border-cyan-400 text-cyan-300 shadow-md shadow-cyan-500/20"
                   : "bg-gray-800/80 border-gray-700/60 text-gray-400 hover:text-white"
               }`}
             >
               <Layers className="w-4 h-4" />
-              <span className="text-[10px] hidden sm:inline">{isBurstMode ? "2連写ON [B]" : "通常 [B]"}</span>
+              <span className="text-[10px] hidden sm:inline">[B]</span>
             </button>
 
             {/* カメラ切替 */}
@@ -647,7 +748,7 @@ export default function QuizResponderPage() {
           </div>
         </div>
 
-        {/* クイック出題ジャンル [キー1〜5] */}
+        {/* クイック出題ジャンル [キー1〜6] */}
         <div className="flex items-center gap-1.5 overflow-x-auto text-[11px] no-scrollbar">
           {QUIZ_PRESETS.map((preset) => (
             <button
@@ -665,7 +766,7 @@ export default function QuizResponderPage() {
           ))}
         </div>
 
-        {/* 単位・条件クイック補完チップ（ワンクリックで追加） */}
+        {/* 単位・条件クイック補完チップ */}
         <div className="flex items-center gap-1 overflow-x-auto text-[10px] no-scrollbar py-0.5">
           <span className="text-gray-400 font-bold shrink-0">省略補完:</span>
           {QUICK_CONDITION_TAGS.map((tag) => (
@@ -751,6 +852,14 @@ export default function QuizResponderPage() {
             </div>
           )}
 
+          {/* VTR記録中ステータスバッジ（画面オーバーレイ） */}
+          {isVtrRecording && (
+            <div className="absolute top-3 left-3 bg-red-600/90 text-white font-black px-3 py-1.5 rounded-xl shadow-lg border border-red-400 text-xs flex items-center gap-2 animate-pulse z-20">
+              <span className="w-2.5 h-2.5 rounded-full bg-white animate-ping" />
+              <span>VTR記録中: {vtrFrameCount}フレーム蓄積済 (VTR終了後Spaceを押下)</span>
+            </div>
+          )}
+
           {/* クイズ認識ファインダー */}
           {isCameraReady && !cameraError && (
             <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-between p-3.5 z-10">
@@ -771,7 +880,7 @@ export default function QuizResponderPage() {
               </div>
 
               <div className="text-[10px] text-gray-400 bg-black/60 px-2 py-0.5 rounded font-mono">
-                {isBurstMode ? "📑 2連写モードON" : "⚡ 1枚高速判定"} | [Space]キーで即時撮影
+                {isBurstMode ? "📑 2連写モードON" : isVtrRecording ? "🎬 VTRタイムシフト蓄積中" : "⚡ 1枚高速判定"} | [Space]キーで解答
               </div>
             </div>
           )}
@@ -841,11 +950,11 @@ export default function QuizResponderPage() {
                 </div>
               )}
 
-              {/* 2行目以降: 根拠・単位・ひっかけ理由 */}
+              {/* 2行目以降: 根拠・VTR理由・単位・ひっかけ理由 */}
               {explanationLines && (
                 <div>
                   <div className="text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-1">
-                    根拠・復元した単位・条件
+                    根拠・VTR照合・復元した単位
                   </div>
                   <div className="text-xs sm:text-sm text-gray-200 leading-relaxed bg-black/60 p-2.5 rounded-xl border border-gray-800 whitespace-pre-wrap">
                     {explanationLines}
@@ -856,7 +965,7 @@ export default function QuizResponderPage() {
               {isLoading && !firstLine && (
                 <div className="flex items-center gap-2 py-3 justify-center text-amber-300 text-xs font-bold">
                   <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-ping" />
-                  <span>10秒カウントダウン！画像・音声・単位逆算中...（目標2秒）</span>
+                  <span>10秒カウントダウン！VTR・画像・音声・単位逆算中...（目標1〜2秒）</span>
                 </div>
               )}
             </div>
@@ -888,7 +997,7 @@ export default function QuizResponderPage() {
             {isLoading ? (
               <>
                 <RefreshCw className="w-6 h-6 animate-spin text-white" />
-                <span>解析中...</span>
+                <span>超速判定中...</span>
               </>
             ) : (
               <>
@@ -902,13 +1011,14 @@ export default function QuizResponderPage() {
         {/* PCキーボードショートカット一覧ガイド */}
         <div className="w-full max-w-xl flex items-center justify-center gap-3 text-[10px] text-gray-400 font-mono bg-black/40 py-1 px-2 rounded-lg border border-gray-800">
           <span className="flex items-center gap-1 text-gray-300">
-            <Keyboard className="w-3 h-3" /> PC操作:
+            <Keyboard className="w-3 h-3" /> 操作:
           </span>
-          <span><strong className="text-amber-400">[Space/Enter]</strong> 撮影</span>
+          <span><strong className="text-amber-400">[Space]</strong> 撮影</span>
+          <span><strong className="text-red-400">[V]</strong> VTR記録</span>
           <span><strong className="text-cyan-400">[M]</strong> マイク</span>
           <span><strong className="text-cyan-400">[B]</strong> 2連写</span>
           <span><strong className="text-cyan-400">[R]</strong> リセット</span>
-          <span><strong className="text-cyan-400">[1〜5]</strong> ジャンル</span>
+          <span><strong className="text-cyan-400">[1〜6]</strong> ジャンル</span>
         </div>
       </footer>
     </div>
