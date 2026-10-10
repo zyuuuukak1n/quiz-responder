@@ -38,3 +38,6 @@ Thumbs.db
 # Typescript cache
 *.tsbuildinfo
 next-env.d.ts
+
+# Antigravy Log
+INTERACTION_LOG.md
