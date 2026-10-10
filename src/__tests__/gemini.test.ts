@@ -27,10 +27,10 @@ describe("gemini.ts - オールスター感謝祭 特化型推論クライアン
     delete process.env.GEMINI_API_KEY;
   });
 
-  it("システムプロンプトがオールスター感謝祭のdボタン番号・省略文復元・引っかけ警戒を規定していること", () => {
+  it("システムプロンプトがオールスター感謝祭のdボタン番号・単位や問題文省略復元・引っかけ警戒を規定していること", () => {
     expect(SYSTEM_PROMPT).toContain("オールスター感謝祭");
     expect(SYSTEM_PROMPT).toContain("リモコン4択番号");
-    expect(SYSTEM_PROMPT).toContain("省略された問題文");
+    expect(SYSTEM_PROMPT).toContain("単位・比較条件・問題文の省略");
     expect(SYSTEM_PROMPT).toContain("引っかけ・ニッチ問題");
     expect(SYSTEM_PROMPT).toContain("ズームアウト");
   });
