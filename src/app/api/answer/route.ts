@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { defaultRateLimiter } from "@/lib/rateLimiter";
-import { validateMediaBuffer } from "@/lib/validation";
+import {
+  validateMediaBuffer,
+  sanitizeAndValidateContextText,
+  computeMediaRequestHash,
+} from "@/lib/validation";
 import { streamQuizAnswer, MediaInputItem } from "@/lib/gemini";
 
 /**
@@ -57,7 +61,42 @@ export async function POST(request: NextRequest) {
     : request.headers.get("x-real-ip") || "127.0.0.1";
   const clientIpMasked = maskIp(rawIp);
 
-  // 1. レートリミット検証
+  // 1. セキュリティ検証: Sec-Fetch-Site（CSRF / 悪意ある外部サイトからの直接スクリプト実行遮断）
+  const secFetchSite = request.headers.get("sec-fetch-site");
+  if (secFetchSite === "cross-site") {
+    logEvent({
+      level: "warn",
+      requestId,
+      clientIpMasked,
+      status: 403,
+      message: "クロスサイトリクエスト遮断（Sec-Fetch-Site: cross-site）",
+    });
+    return NextResponse.json(
+      { error: "外部オリジンからの不正なリクエストは拒否されました。" },
+      { status: 403 }
+    );
+  }
+
+  // 2. セキュリティ検証: オプトインのパスコード認証（ACCESS_PASSCODE 設定時のみ）
+  const requiredPasscode = process.env.ACCESS_PASSCODE;
+  if (requiredPasscode) {
+    const providedPasscode = request.headers.get("x-access-passcode");
+    if (!providedPasscode || providedPasscode !== requiredPasscode) {
+      logEvent({
+        level: "warn",
+        requestId,
+        clientIpMasked,
+        status: 401,
+        message: "アクセスパスコード不一致または未入力",
+      });
+      return NextResponse.json(
+        { error: "パスコードが無効または設定されていません。" },
+        { status: 401 }
+      );
+    }
+  }
+
+  // 3. API浪費防御: 多段階レートリミット検証
   const rateLimitResult = defaultRateLimiter.check(rawIp);
   if (!rateLimitResult.allowed) {
     const durationMs = Date.now() - startTime;
@@ -67,12 +106,13 @@ export async function POST(request: NextRequest) {
       clientIpMasked,
       durationMs,
       status: 429,
-      message: "レートリミット超過（短時間での過剰リクエスト）",
+      message: `レートリミット超過: ${rateLimitResult.reason || "過剰リクエスト"}`,
     });
 
     return NextResponse.json(
       {
-        error: "短時間でのリクエストが多すぎます。少し待ってから再試行してください。",
+        error:
+          "短時間でのリクエストが多すぎます。少し待ってから再試行してください。",
         resetTimeMs: rateLimitResult.resetTimeMs,
       },
       {
@@ -86,14 +126,31 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // 2. アップロードデータの取得 & バリデーション
+  // 4. API浪費防御: 同一IP同時実行排他ロック（In-Flight Lock）
+  const acquired = defaultRateLimiter.acquireInFlight(rawIp);
+  if (!acquired) {
+    logEvent({
+      level: "warn",
+      requestId,
+      clientIpMasked,
+      status: 429,
+      message: "前の解答リクエストが処理中のため同時リクエストを拒否",
+    });
+    return NextResponse.json(
+      { error: "直前の解析リクエストが処理中です。完了をお待ちください。" },
+      { status: 429 }
+    );
+  }
+
+  // 5. アップロードデータの取得 & バリデーション
   let videoInput: MediaInputItem | undefined;
   const imageInputs: MediaInputItem[] = [];
-  let contextText: string | undefined;
+  let sanitizedContext: string = "";
 
   try {
     const contentType = request.headers.get("content-type") || "";
     if (!contentType.includes("multipart/form-data")) {
+      defaultRateLimiter.releaseInFlight(rawIp);
       logEvent({
         level: "warn",
         requestId,
@@ -108,13 +165,19 @@ export async function POST(request: NextRequest) {
     }
 
     const formData = await request.formData();
-    contextText = (formData.get("context") as string) || undefined;
+    const rawContext = (formData.get("context") as string) || "";
+    const contextValidation = sanitizeAndValidateContextText(rawContext);
+    sanitizedContext = contextValidation.sanitizedText;
 
     // A. VTR動画ファイル（WebM/MP4）がある場合
     const videoFile = formData.get("video");
     if (videoFile && videoFile instanceof Blob) {
       const videoBuffer = new Uint8Array(await videoFile.arrayBuffer());
-      const videoValidation = validateMediaBuffer(videoBuffer, videoFile.type, true);
+      const videoValidation = validateMediaBuffer(
+        videoBuffer,
+        videoFile.type,
+        true
+      );
       if (videoValidation.isValid) {
         videoInput = {
           base64Data: Buffer.from(videoBuffer).toString("base64"),
@@ -162,12 +225,14 @@ export async function POST(request: NextRequest) {
     }
 
     if (!videoInput && imageInputs.length === 0) {
+      defaultRateLimiter.releaseInFlight(rawIp);
       return NextResponse.json(
         { error: "有効な画像または動画データが送信されていません。" },
         { status: 400 }
       );
     }
   } catch (err: unknown) {
+    defaultRateLimiter.releaseInFlight(rawIp);
     const errorMessage = err instanceof Error ? err.message : "データ解析失敗";
     logEvent({
       level: "error",
@@ -183,19 +248,74 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // 3. SSEストリーミングレスポンス構築
+  // 6. 重複リクエストキャッシュの確認（API課金浪費の完全抑止）
+  const primaryMediaData =
+    imageInputs[0]?.base64Data || videoInput?.base64Data || "";
+  const requestHashKey = computeMediaRequestHash(
+    primaryMediaData,
+    sanitizedContext
+  );
+  const cachedChunks = defaultRateLimiter.getCachedAnswer(requestHashKey);
+
+  // 7. SSEストリーミングレスポンス構築
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
       try {
+        // キャッシュヒット時はGemini呼び出しを行わず即座に配信
+        if (cachedChunks && cachedChunks.length > 0) {
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({
+                type: "meta",
+                ttftMs: 5,
+                cached: true,
+              })}\n\n`
+            )
+          );
+
+          for (const chunk of cachedChunks) {
+            controller.enqueue(
+              encoder.encode(
+                `data: ${JSON.stringify({
+                  type: "chunk",
+                  text: chunk,
+                })}\n\n`
+              )
+            );
+          }
+
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({
+                type: "done",
+                elapsedMs: Date.now() - startTime,
+                cached: true,
+              })}\n\n`
+            )
+          );
+          controller.close();
+
+          logEvent({
+            level: "info",
+            requestId,
+            clientIpMasked,
+            durationMs: Date.now() - startTime,
+            status: 200,
+            message: "重複リクエストキャッシュヒットにより高速返却（API呼び出しスキップ）",
+          });
+          return;
+        }
+
         let firstTokenTime: number | null = null;
         let tokenCount = 0;
+        const recordedChunks: string[] = [];
 
-        // Gemini (3.5 Flash Lite) へのストリーミング推論（7秒タイムアウト設定済み）
+        // Gemini へのストリーミング推論（7秒タイムアウト設定済み）
         for await (const chunk of streamQuizAnswer({
           video: videoInput,
           images: imageInputs,
-          contextText,
+          contextText: sanitizedContext,
         })) {
           if (!firstTokenTime) {
             firstTokenTime = Date.now();
@@ -211,6 +331,7 @@ export async function POST(request: NextRequest) {
           }
 
           tokenCount++;
+          recordedChunks.push(chunk);
           controller.enqueue(
             encoder.encode(
               `data: ${JSON.stringify({
@@ -219,6 +340,11 @@ export async function POST(request: NextRequest) {
               })}\n\n`
             )
           );
+        }
+
+        // 成功した回答を短期キャッシュに保存（20秒間）
+        if (recordedChunks.length > 0) {
+          defaultRateLimiter.setCachedAnswer(requestHashKey, recordedChunks, 20_000);
         }
 
         const totalElapsedMs = Date.now() - startTime;
@@ -238,7 +364,7 @@ export async function POST(request: NextRequest) {
           clientIpMasked,
           durationMs: totalElapsedMs,
           status: 200,
-          message: `オールスター感謝祭解答完了 (動画有無: ${!!videoInput}, 画像数: ${
+          message: `クイズ解答完了 (動画有無: ${!!videoInput}, 画像数: ${
             imageInputs.length
           }, トークン数: ${tokenCount}, TTFT: ${
             firstTokenTime ? firstTokenTime - startTime : 0
@@ -271,6 +397,9 @@ export async function POST(request: NextRequest) {
           )
         );
         controller.close();
+      } finally {
+        // 同時実行ロックを確実に解放
+        defaultRateLimiter.releaseInFlight(rawIp);
       }
     },
   });

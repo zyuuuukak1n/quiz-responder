@@ -2,11 +2,13 @@
  * 画像および動画入力バリデーションユーティリティ
  * 防御的設計原則に基づき、拡張子やContent-Typeの偽装を防止するため
  * バイナリ先頭のマジックナンバー検証および厳格なサイズ制限を実施します。
+ * また、プロンプトインジェクションや過剰トークン消費を防止するテキスト検証も含みます。
  */
 
 export const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024; // 5MB
 export const MAX_FILE_SIZE_BYTES = MAX_IMAGE_SIZE_BYTES; // 後方互換性エイリアス
-export const MAX_VIDEO_SIZE_BYTES = 25 * 1024 * 1024; // 25MB（VTR動画用）
+export const MAX_VIDEO_SIZE_BYTES = 25 * 1024 * 1024; // 25MB（動画用）
+export const MAX_CONTEXT_TEXT_LENGTH = 500; // ルール・メモの最大長（トークン浪費・攻撃防止）
 
 export const ALLOWED_IMAGE_TYPES = [
   "image/webp",
@@ -107,7 +109,7 @@ export function validateImageBuffer(
 }
 
 /**
- * メディア（画像またはVTR動画）の妥当性を検証します。
+ * メディア（画像または動画）の妥当性を検証します。
  */
 export function validateMediaBuffer(
   buffer: Uint8Array,
@@ -148,7 +150,6 @@ export function validateMediaBuffer(
 
   // 申告MIMEタイプがある場合、検知結果との乖離をチェック（偽装防止）
   if (declaredMimeType && !declaredMimeType.includes(detected.split("/")[1])) {
-    // 例: video/webm;codecs=vp8 等のサブパラメータを許容
     return {
       isValid: false,
       error: `ヘッダーの形式(${declaredMimeType})と実際のファイル形式(${detected})が一致しません。`,
@@ -160,4 +161,48 @@ export function validateMediaBuffer(
     isValid: true,
     detectedMimeType: detected,
   };
+}
+
+/**
+ * 補足ルールや音声文字起こしテキストのサニタイズ & 長さ検証
+ * プロンプトインジェクションや過度なトークン浪費を防御します。
+ */
+export function sanitizeAndValidateContextText(
+  text?: string
+): { isValid: boolean; sanitizedText: string; error?: string } {
+  if (!text || text.trim().length === 0) {
+    return { isValid: true, sanitizedText: "" };
+  }
+
+  // 制御文字（NULLバイトなど）の除去
+  let cleaned = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "").trim();
+
+  // 最大長チェック
+  if (cleaned.length > MAX_CONTEXT_TEXT_LENGTH) {
+    cleaned = cleaned.slice(0, MAX_CONTEXT_TEXT_LENGTH);
+  }
+
+  // システム指示の上書きを狙うXML風閉じタグのサニタイズ
+  cleaned = cleaned
+    .replace(/<\/?[a-zA-Z_]+>/g, "")
+    .replace(/```/g, "'''");
+
+  return {
+    isValid: true,
+    sanitizedText: cleaned,
+  };
+}
+
+/**
+ * リクエストの重複検知用キャッシュキーを生成します。
+ */
+export function computeMediaRequestHash(
+  mainBase64Data: string,
+  contextText: string = ""
+): string {
+  // 長大なbase64全体をハッシュ化する代わりに、先頭・末尾・長さ・コンテキストから高速キーを生成
+  const head = mainBase64Data.slice(0, 64);
+  const tail = mainBase64Data.slice(-64);
+  const len = mainBase64Data.length;
+  return `hash_${len}_${head.slice(0, 16)}_${tail.slice(-16)}_${contextText.slice(0, 32)}`;
 }

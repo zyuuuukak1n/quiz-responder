@@ -1,8 +1,12 @@
 @import "tailwindcss";
 
 :root {
-  --background: #090d16;
+  --background: #070b14;
   --foreground: #f3f4f6;
+}
+
+html {
+  scroll-behavior: smooth;
 }
 
 body {
@@ -13,6 +17,13 @@ body {
   overflow-x: hidden;
   user-select: none;
   -webkit-touch-callout: none;
+  touch-action: manipulation; /* スマホのダブルタップズーム遅延を根絶 */
+  min-height: 100dvh;
+}
+
+/* セーフエリア対応ユーティリティ */
+.safe-bottom {
+  padding-bottom: max(1rem, env(safe-area-inset-bottom));
 }
 
 /* スキャンレーザーアニメーション */
@@ -50,8 +61,8 @@ body {
 
 /* カスタムスクロールバー */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
 }
 ::-webkit-scrollbar-track {
   background: rgba(15, 23, 42, 0.6);

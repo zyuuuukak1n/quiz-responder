@@ -21,19 +21,27 @@ vi.mock("@google/generative-ai", () => {
   };
 });
 
-describe("gemini.ts - オールスター感謝祭 完全制覇エンジン (gemini-3.5-flash-lite)", () => {
+describe("gemini.ts - リアルタイム・クイズ超速解答エンジン (gemini-3.5-flash-lite)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     delete process.env.GEMINI_API_KEY;
   });
 
-  it("システムプロンプトがVTR完全動画・超ひっかけなぞなぞ・ビジュアル・出演者・単位逆算を網羅していること", () => {
-    expect(SYSTEM_PROMPT).toContain("オールスター感謝祭");
+  it("システムプロンプトから番組固有の固有名詞が完全に排除され、汎用4択・テレビクイズ仕様であること", () => {
+    // 固有名詞が排除されていること
+    expect(SYSTEM_PROMPT).not.toContain("オールスター感謝祭");
+    expect(SYSTEM_PROMPT).not.toContain("TBS");
+    expect(SYSTEM_PROMPT).not.toContain("今田耕司");
+    expect(SYSTEM_PROMPT).not.toContain("島崎和歌子");
+    expect(SYSTEM_PROMPT).not.toContain("赤坂5丁目ミニマラソン");
+
+    // 汎用4色・クイズ解答機能が網羅されていること
     expect(SYSTEM_PROMPT).toContain("リモコン4択番号");
     expect(SYSTEM_PROMPT).toContain("VTR完全動画（映像＆音声）");
     expect(SYSTEM_PROMPT).toContain("超ひっかけ問題・なぞなぞ");
     expect(SYSTEM_PROMPT).toContain("ズームアウト");
     expect(SYSTEM_PROMPT).toContain("単位・条件・問題文省略の逆算・復元");
+    expect(SYSTEM_PROMPT).toContain("ユーザー指定のクイズ説明・ルール・前提条件の絶対遵守");
   });
 
   it("APIキーが未設定の場合に適切な例外を送出すること（防御的設計）", async () => {
